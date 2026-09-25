@@ -101,7 +101,7 @@ class CybleClient:
             "Accept": "application/json",
             "Content-Type": "application/json",
             "Referer": "https://cyble.ai/",
-            "User-Agent": "cyble-anomali-threatstream-feed/0.2.0",
+            "User-Agent": "cyble-anomali-threatstream-feed/0.3.0",
         }
         retryable = {429, 500, 502, 503, 504}
         url = API_ROOT + path

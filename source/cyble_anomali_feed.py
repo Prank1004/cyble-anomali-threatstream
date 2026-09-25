@@ -21,8 +21,9 @@ import requests
 from cyble_client import CybleAPIError, CybleClient
 
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 LOGGER = logging.getLogger("cyble_anomali_feed")
+DEFAULT_MAX_REPORT_BYTES = 4 * 1024 * 1024
 SAFE_CONTEXT_KEYS = {
     "risk_score",
     "risk_rating",
@@ -68,6 +69,22 @@ EXCLUDED_KEYS = {
 }
 EMAIL_RE = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
 SECRET_RE = re.compile(r"(?i)(?:password|passwd|secret|api[_ -]?key|access[_ -]?token)\s*[:=]")
+SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b(password|passwd|secret|api[_ -]?key|access[_ -]?token|refresh[_ -]?token|authorization|cookie)\b"
+    r"\s*(?::|=|is)?\s*[^,\n;]{1,256}"
+)
+SSN_RE = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
+CARD_CANDIDATE_RE = re.compile(r"(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)")
+SENSITIVE_FIELD_PARTS = {
+    "password", "passwd", "secret", "credential", "authorization", "accesstoken", "refreshtoken",
+    "cookie", "session", "email", "phone", "mobile", "telephone", "socialsecurity", "ssn",
+    "creditcard", "cardnumber", "paymentcard", "bankaccount", "accountnumber", "username",
+    "firstname", "lastname", "fullname", "dateofbirth", "birthdate", "dob", "personname",
+    "assignee", "assignedto", "createdby", "updatedby", "contactemail",
+}
+UNSTRUCTURED_DATA_FIELD_NAMES = {
+    "content", "message", "body", "rawtext", "pastecontent",
+}
 VALID_TLP = {"amber", "green", "red", "white"}
 FORBIDDEN_CONTEXT_PATHS = {"description", "content", "message", "payload", "raw", "body", "text"}
 
@@ -132,6 +149,81 @@ def _clean_scalar(value: Any, limit: int = 500) -> str | None:
     if not text or EMAIL_RE.search(text) or SECRET_RE.search(text):
         return None
     return text[:limit]
+
+
+def _passes_luhn(value: str) -> bool:
+    digits = re.sub(r"\D", "", value)
+    if not 13 <= len(digits) <= 19:
+        return False
+    total = 0
+    parity = len(digits) % 2
+    for index, char in enumerate(digits):
+        digit = int(char)
+        if index % 2 == parity:
+            digit *= 2
+            if digit > 9:
+                digit -= 9
+        total += digit
+    return total % 10 == 0
+
+
+def _redact_text(value: str) -> str:
+    text = EMAIL_RE.sub("<redacted-email>", value)
+    text = SSN_RE.sub("<redacted-ssn>", text)
+    text = SECRET_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}=<redacted>", text)
+    text = CARD_CANDIDATE_RE.sub(
+        lambda match: "<redacted-payment-card>" if _passes_luhn(match.group(0)) else match.group(0),
+        text,
+    )
+    return text
+
+
+def _sanitize_alert_fields(value: Any, key: str = "", depth: int = 0) -> Any:
+    """Keep the Cyble field structure while redacting sensitive values."""
+    if depth > 32:
+        raise ValueError("Cyble alert nesting exceeds the supported depth; no report was truncated and the checkpoint will not advance.")
+    normalized_key = re.sub(r"[^a-z0-9]", "", key.lower())
+    if normalized_key and any(part in normalized_key for part in SENSITIVE_FIELD_PARTS):
+        return "<redacted:sensitive-field>"
+
+    if isinstance(value, dict):
+        return {str(child_key): _sanitize_alert_fields(child, str(child_key), depth + 1)
+                for child_key, child in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_alert_fields(child, key, depth + 1) for child in value]
+    if isinstance(value, str):
+        if normalized_key in UNSTRUCTURED_DATA_FIELD_NAMES:
+            try:
+                parsed = json.loads(value)
+            except (ValueError, json.JSONDecodeError):
+                return "<omitted:unstructured-content>"
+            if isinstance(parsed, (dict, list)):
+                return _sanitize_alert_fields(parsed, key, depth + 1)
+            return "<omitted:unstructured-content>"
+        if normalized_key in {"data", "payload", "datamessage", "data_message"}:
+            try:
+                parsed = json.loads(value)
+            except (ValueError, json.JSONDecodeError):
+                return "<omitted:unstructured-data-string>"
+            if isinstance(parsed, (dict, list)):
+                return _sanitize_alert_fields(parsed, key, depth + 1)
+            return "<omitted:unstructured-data-string>"
+        return _redact_text(value)
+    return value
+
+
+def _serialize_alert_fields(alert: dict[str, Any], max_bytes: int) -> str:
+    """Serialize every structured alert field; reject oversize records without truncating."""
+    safe_alert = _sanitize_alert_fields(alert)
+    serialized = json.dumps(safe_alert, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    # Keep arbitrary Cyble strings from terminating the Markdown code fence. The
+    # replacement remains valid JSON and decodes to the original backtick value.
+    serialized = serialized.replace("`", r"\u0060")
+    if len(serialized.encode("utf-8")) > max_bytes:
+        raise ValueError(
+            "A sanitized Cyble alert exceeds CYBLE_MAX_REPORT_BYTES; no report was truncated and the checkpoint will not advance."
+        )
+    return serialized
 
 
 def _alert_identifier(alert: dict[str, Any]) -> str:
@@ -413,7 +505,8 @@ def _timestamp(alert: dict[str, Any], keys: Iterable[str]) -> str | None:
 
 
 def _map_alert(alert: dict[str, Any], service: str, Indicator: Any, Report: Any,
-               threat_type: str, tlp: str, field_map: dict[str, Any]) -> Any:
+               threat_type: str, tlp: str, field_map: dict[str, Any],
+               max_report_bytes: int = DEFAULT_MAX_REPORT_BYTES) -> Any:
     alert_id = _alert_identifier(alert)
     actual_service = str(alert.get("service") or service)
     status = _clean_scalar(alert.get("status"), 80)
@@ -454,10 +547,15 @@ def _map_alert(alert: dict[str, Any], service: str, Indicator: Any, Report: Any,
     if alert_updated:
         summary.append(f"Alert updated: {alert_updated}")
     if context:
-        summary.append("Safe context fields:")
+        summary.append("Configured context mappings:")
         summary.extend(f"- {key}: {value}" for key, value in context)
     summary.append(f"Validated observables associated: {len(indicators)}")
-    summary.append("Raw alert payload and personal data are not copied into this report.")
+    summary.append(
+        "The complete structured Cyble alert is included below. Sensitive values are redacted; "
+        "unstructured content fields are omitted."
+    )
+    serialized_alert = _serialize_alert_fields(alert, max_report_bytes)
+    summary.extend(("", "Sanitized Cyble alert fields:", "```json", serialized_alert, "```"))
 
     return Report(
         name=f"Cyble Vision alert {alert_id}",
@@ -560,6 +658,9 @@ def run_poll() -> None:
     sdk_logger.propagate = False
     services = _configured_services()
     page_size = _env_int("CYBLE_PAGE_SIZE", 200, 1, 2000)
+    max_report_bytes = _env_int(
+        "CYBLE_MAX_REPORT_BYTES", DEFAULT_MAX_REPORT_BYTES, 1024, 20 * 1024 * 1024
+    )
     max_pages = _env_int("CYBLE_MAX_PAGES_PER_SERVICE", 100, 1, 10000)
     overlap_seconds = _env_int("CYBLE_OVERLAP_SECONDS", 300, 0, 86400)
     max_run_minutes = _env_int("CYBLE_MAX_RUN_MINUTES", 20, 1, 24 * 60)
@@ -636,7 +737,9 @@ def run_poll() -> None:
                 if not alerts:
                     break
                 reports = [
-                    _map_alert(alert, service, Indicator, Report, threat_type, tlp, field_map)
+                    _map_alert(
+                        alert, service, Indicator, Report, threat_type, tlp, field_map, max_report_bytes
+                    )
                     for alert in alerts
                     if isinstance(alert, dict)
                 ]

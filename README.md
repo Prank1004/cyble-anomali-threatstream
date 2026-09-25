@@ -2,7 +2,7 @@
 
 A scheduled Python connector that reads Cyble Vision Alerts API v2 and ingests alert bulletins plus validated observables into Anomali ThreatStream through the Anomali Feed SDK 2.8.1. It uses Cyble's JSON API directly; STIX and TAXII are not required.
 
-> **Status: integration preview, 0.2.0.** The live Cyble API shape has been inspected for the `iocs` and `new_vulnerability` services. The API guide and live probes do not provide a common schema for every alert service, so additional service-specific paths can be added in `config/field-map.example.json`. No ThreatStream tenant write has been performed from this development workspace.
+> **Status: integration preview, 0.3.0.** The live Cyble MCP service catalogue exposed 52 alert service names for the connected tenant. Response schemas vary by service. The connector preserves the complete structured record for every configured service in the ThreatStream report body, while also mapping recognized observables into native Indicators. Only `iocs` and `new_vulnerability` detailed payloads have been inspected live. No ThreatStream tenant write has been performed from this development workspace.
 
 ## Data flow
 
@@ -22,7 +22,7 @@ The connector makes one bounded poll per invocation. Configure the ThreatStream 
 
 ## Mapping
 
-Each Cyble alert becomes a private ThreatStream `tipreport` bulletin, and recognized indicators are associated with that bulletin. The connector maps the following observed Cyble fields:
+Each Cyble alert becomes a private ThreatStream `tipreport` bulletin. The full structured alert record, including service-specific nested objects and arrays, is preserved in its report body after sensitive-value sanitization. Recognized indicators are also associated as native ThreatStream Indicators. Cyble's arbitrary service-specific fields do not have one-to-one native ThreatStream fields, so their original field names and sanitized values remain together in the embedded JSON.
 
 | Cyble Alerts API v2 field | ThreatStream mapping |
 |---|---|
@@ -33,11 +33,11 @@ Each Cyble alert becomes a private ThreatStream `tipreport` bulletin, and recogn
 | `data.ioc_type` | Type hint for Cyble IOC values; the SDK validates the final Anomali iType |
 | `data.hosting_ip` | Additional IOC candidate |
 | `data.first_seen`, `data.last_seen`, `first_seen_on`, `last_seen_on` | Observable source timestamps and bulletin context |
-| `data.confident_rating`, `data.risk_rating`, `data.behaviour_tags`, `data.ioc_attack_name`, `data.reference_link` | Safe bulletin context; risk/confidence labels are not converted into an Anomali confidence score |
-| `cve` | Bulletin context, not an observable |
-| Other service-specific JSON data | Recursively inspected for IOC-shaped keys; add explicit paths to the field map when a service uses different names |
+| `data.confident_rating`, `data.risk_rating`, `data.behaviour_tags`, `data.ioc_attack_name`, `data.reference_link` | Preserved in the full JSON report body; risk/confidence labels are not converted into an Anomali confidence score |
+| `cve` and every other structured Cyble field | Preserved under the original field name in the report's sanitized JSON body |
+| Recognized IOC values anywhere in the record | Validated and attached as native ThreatStream Indicators |
 
-Cyble's live `iocs` payload can include an opaque `data` string for other services. If that value contains JSON, the connector parses it in memory and extracts only fields with IOC-shaped names. It never copies the original string or the raw alert body into ThreatStream or logs.
+Cyble's live `iocs` payload can include service data encoded as JSON. The connector parses structured JSON strings and preserves the resulting fields in the report body. Non-JSON free-text content is omitted; sensitive values are replaced with markers while field names remain. The report body is rejected rather than silently truncated if it exceeds `CYBLE_MAX_REPORT_BYTES`.
 
 `config/field-map.example.json` supports dotted paths, `[*]` array expansion, and a per-service override. Example:
 
@@ -61,14 +61,15 @@ Cyble's live `iocs` payload can include an opaque `data` string for other servic
 }
 ```
 
-The `my_service` names above are examples, not Cyble fields. Use actual paths from the corresponding service response. Do not map free-text descriptions, credential values, personal data, payment data, or raw alert content into reports.
+The `my_service` names above are examples, not Cyble fields. Use actual paths from the corresponding service response when IOC values use nonstandard field names. `context_paths` adds selected safe fields to the report summary; every structured field is already preserved in the embedded alert JSON.
 
 ### Data handling
 
 - Visibility is fixed to private and TLP defaults to amber.
 - `FALSE_POSITIVE` alerts are excluded by the Cyble query.
-- Email addresses, usernames, passwords, tokens, cookies, card/SSN/phone fields, and non-public IP addresses are excluded from observable extraction.
-- Raw descriptions and raw alert payloads are not sent to ThreatStream or written to disk or logs. Detailed `dataMessage` content is fetched in memory by default so the connector can find typed IOC fields; set `CYBLE_WITH_DATA_MESSAGE=false` if you want metadata-only polling.
+- Email addresses, usernames, passwords, tokens, cookies, card/SSN/phone values and other recognized sensitive fields are redacted from report JSON; their Cyble field names remain visible. Sensitive values and non-public IP addresses are excluded from observable extraction.
+- Structured `dataMessage` content is fetched in memory by default, sanitized, and included in each report body; set `CYBLE_WITH_DATA_MESSAGE=false` for metadata-only polling. Non-JSON free-text content fields are represented by omission markers. Descriptions are retained after common email, SSN, payment-card, and credential-assignment redaction.
+- A sanitized alert larger than `CYBLE_MAX_REPORT_BYTES` or deeper than the supported nesting limit fails the poll. The connector does not truncate it or advance its checkpoint, so the condition can be reviewed and corrected.
 - Cyble risk ratings and confidence labels are preserved as text context. They are not treated as Anomali source confidence because those scales are not documented as equivalent.
 - The connector is read-only against Cyble. It does not update Cyble alert status or add comments.
 
@@ -112,6 +113,7 @@ Supply these values through the Anomali feed runner's secret/environment configu
 | `CYBLE_TLP` | No | `amber`, `green`, `red`, or `white`; default `amber` |
 | `CYBLE_FIELD_MAP_PATH` | No | Path to a customized JSON mapping file |
 | `CYBLE_MAX_RUN_MINUTES` | No | Stop before the SDK runtime limit; default 20 |
+| `CYBLE_MAX_REPORT_BYTES` | No | Maximum sanitized alert JSON size in a report body; default 4 MiB. Oversized records fail the poll without checkpoint advancement. |
 
 The Cyble `/services` endpoint is available for discovery. To list the services accessible to the configured token:
 
@@ -119,7 +121,7 @@ The Cyble `/services` endpoint is available for discovery. To list the services 
 python3 source/cyble_anomali_feed.py --list-services
 ```
 
-Choose the service allowlist deliberately. Cyble exposes credential-bearing services; the connector filters known sensitive fields, but each service still needs review before enabling it in a partner feed.
+`CYBLE_SERVICES` may include any service entitled to the API token. Choose the allowlist deliberately, especially for credential-bearing services. The connector preserves every structured field for those services while redacting recognized credential and personal-data values; raw unstructured content is omitted.
 
 ## Scheduling and operation
 
@@ -133,10 +135,8 @@ A run fails without advancing its watermark if an API request fails, the respons
 
 The connector uses verified TLS for Cyble and ThreatStream, bounded retries for transient Cyble errors, and the SDK's configured proxy settings. Logs contain counts and service names only, not response bodies, IOC values, or credentials.
 
-## References
+## Cyble documentation
 
-- [CrowdStrike sample Anomali ThreatStream repository](https://github.com/CrowdStrike/foundry-sample-anomali-threatstream) — public structure and deployment-documentation reference.
-- [GreyNoise Anomali integration](https://github.com/GreyNoise-Intelligence/greynoise-anomali) — public Anomali integration reference.
 - [Cyble Vision API access](https://cyble.ai/utilities/access-apis?tab=alerts-api-v2) — Alerts API v2 access and documentation.
 
 This is an independent community connector. It is not endorsed or supported by Cyble or Anomali.

@@ -11,3 +11,8 @@ dist/
 *.jsonl
 cyble-alert-exports/
 .DS_Store
+*.log
+*.log.*
+.coverage
+htmlcov/
+.pytest_cache/

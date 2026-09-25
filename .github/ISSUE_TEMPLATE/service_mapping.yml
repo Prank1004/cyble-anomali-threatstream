@@ -1,0 +1,41 @@
+name: Service mapping request
+description: Propose support for a Cyble field or native observable mapping.
+title: "[Mapping]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Structured non-sensitive fields already go into the bulletin JSON. Use this form for an extraction rule, a schema the parser does not accept, or a missing native mapping. Use invented values only.
+  - type: input
+    id: service
+    attributes:
+      label: Cyble service slug
+    validations:
+      required: true
+  - type: textarea
+    id: shape
+    attributes:
+      label: Synthetic response shape
+      description: Preserve field names and types while replacing all real values. Do not attach an alert export.
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: mapping
+    attributes:
+      label: Expected ThreatStream representation
+      description: State whether the value belongs in bulletin context or as a native Indicator, and why.
+    validations:
+      required: true
+  - type: textarea
+    id: exclusions
+    attributes:
+      label: Exclusions and known limits
+      description: Examples that should not become Indicators, including monitored/victim assets and false positives.
+  - type: checkboxes
+    id: safe_evidence
+    attributes:
+      label: Evidence review
+      options:
+        - label: Every value is synthetic, and no tenant identifiers or proprietary vendor files are included.
+          required: true

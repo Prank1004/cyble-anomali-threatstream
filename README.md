@@ -1,142 +1,135 @@
-# Cyble Vision Alerts → Anomali ThreatStream Feed
+<p align="center">
+  <a href="https://cyble.com/"><img src="https://cyble.com/wp-content/uploads/2021/11/cropped-Cyble-Black-Logo-1-2127859258-1637602085949-300x300.png" alt="Cyble logo" width="72" height="72"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://www.anomali.com/"><img src="https://cdn.prod.website-files.com/68228a4fdbfec3b02c9c5186/68228a4fdbfec3b02c9c5804_Anomali-webclip-256x256-2024.png" alt="Anomali logo" width="72" height="72"></a>
+</p>
 
-A scheduled Python connector that reads Cyble Vision Alerts API v2 and ingests alert bulletins plus validated observables into Anomali ThreatStream through the Anomali Feed SDK 2.8.1. It uses Cyble's JSON API directly; STIX and TAXII are not required.
+<h1 align="center">Cyble Vision → Anomali ThreatStream</h1>
 
-> **Status: integration preview, 0.3.0.** The live Cyble MCP service catalogue exposed 52 alert service names for the connected tenant. Response schemas vary by service. The connector preserves the complete structured record for every configured service in the ThreatStream report body, while also mapping recognized observables into native Indicators. Only `iocs` and `new_vulnerability` detailed payloads have been inspected live. No ThreatStream tenant write has been performed from this development workspace.
+<p align="center">Continuous alert ingestion through the Anomali Feed SDK.</p>
 
-## Data flow
+<p align="center">
+  <a href="https://github.com/Prank1004/cyble-anomali-threatstream/actions/workflows/ci.yml"><img src="https://github.com/Prank1004/cyble-anomali-threatstream/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/Python-3.10%20%7C%203.11-blue" alt="Python 3.10 and 3.11">
+  <img src="https://img.shields.io/badge/Feed%20SDK-2.8.1-6f42c1" alt="Anomali Feed SDK 2.8.1">
+  <img src="https://img.shields.io/badge/status-integration%20preview-orange" alt="Integration preview">
+</p>
+
+<p align="center">
+  <a href="docs/deployment.md">Deploy</a> ·
+  <a href="docs/api-mapping.md">Field mapping</a> ·
+  <a href="docs/operations.md">Operate</a> ·
+  <a href="docs/validation.md">Validation</a> ·
+  <a href="CONTRIBUTING.md">Contribute</a>
+</p>
+
+This connector polls **Cyble Vision Alerts API v2** and sends private alert bulletins and validated indicators to **Anomali ThreatStream**. Your feed runner schedules repeated polls for continuous ingestion. Cyble's JSON API is the source; a STIX/TAXII subscription is not required.
+
+> **Version 0.4.0 — integration preview.** Local and CI checks cover the implementation; they do not establish a live Cyble-to-ThreatStream delivery. Only `iocs` and `new_vulnerability` detail schemas have been inspected against live Cyble responses. See the [validation record](docs/validation.md) for the exact evidence and remaining tenant checks. This is an independent community project, with no Cyble or Anomali endorsement.
+
+## What it does
+
+- Discovers alert-capable services with `CYBLE_SERVICES=all`, or polls an explicit service list.
+- Creates one private ThreatStream bulletin per alert, retaining structured fields and nested JSON after sanitization.
+- Attaches recognized IPs, domains, URLs, and hashes as native ThreatStream Indicators; supports service-specific JSON paths.
+- Polls creation and update timestamps with replay overlap and persisted service checkpoints.
+- Keeps false-positive alert status in the bulletin without creating new indicators for that alert.
+- Uses verified TLS, bounded polling, guarded checkpoints, and logs that exclude source payloads and credentials.
+
+## How data moves
 
 ```mermaid
 flowchart LR
-    A[ThreatStream scheduled feed run] --> B[Cyble Alerts API v2]
-    B --> C[Service allowlist and incremental polling]
-    C --> D[Map alert to private Threat Bulletin]
-    C --> E[Extract and validate IOC-shaped fields]
-    D --> F[Anomali Feed SDK]
-    E --> F
-    F --> G[ThreatStream feed]
-    F --> H[Save created/updated watermarks]
+    A[Scheduled feed runner] --> B[Discover / select Cyble services]
+    B --> C[Alerts API v2: created + updated windows]
+    C --> D[Sanitize structured fields]
+    D --> E[Private bulletin + JSON context]
+    D --> F[Validate recognized observables]
+    E --> G[Anomali Feed SDK 2.8.1]
+    F --> G
+    G --> H[ThreatStream]
+    G --> I[Persist completed service window]
+    I --> C
 ```
 
-The connector makes one bounded poll per invocation. Configure the ThreatStream feed runner to invoke it on the interval you want (for example, every five minutes) for continuous ingestion. It stores created-at and updated-at watermarks in the ThreatStream feed configuration and uses a configurable overlap to recover boundary records.
+Each process invocation performs bounded work and exits. Configure the ThreatStream feed runner to invoke it repeatedly—for example, every five minutes—and prevent overlapping runs. Poll cadence is controlled by that runner; the repository does not install a scheduler automatically.
 
-## Mapping
+## Quick start
 
-Each Cyble alert becomes a private ThreatStream `tipreport` bulletin. The full structured alert record, including service-specific nested objects and arrays, is preserved in its report body after sensitive-value sanitization. Recognized indicators are also associated as native ThreatStream Indicators. Cyble's arbitrary service-specific fields do not have one-to-one native ThreatStream fields, so their original field names and sanitized values remain together in the embedded JSON.
+You need Python 3.10 or 3.11, a Cyble Alerts API v2 token and company UUID, a provisioned ThreatStream feed, and Anomali Feed SDK **2.8.1** obtained through Anomali. The proprietary SDK is not distributed here.
 
-| Cyble Alerts API v2 field | ThreatStream mapping |
+```bash
+git clone https://github.com/Prank1004/cyble-anomali-threatstream.git
+cd cyble-anomali-threatstream
+python3.11 -m venv .venv
+.venv/bin/python -m pip install /secure/path/anomali_feedsdk-2.8.1-py3-none-any.whl
+.venv/bin/python -m pip install -r requirements.txt
+```
+
+Configure the following through the feed runner's secret and environment store. [`.env.example`](.env.example) documents the names; the connector does not automatically load `.env` files.
+
+| Variable | Value |
 |---|---|
-| `id` (or `uuid` / `alertId`) | Stable bulletin name and `original_source_id` |
-| `service`, `status`, `severity`, `user_severity` | Bulletin metadata and tags; alert severity is mapped to observable severity when supported |
-| `created_at`, `updated_at` | Bulletin source timestamps |
-| `ioc`, `data.ioc` | IOC candidates, validated by the Anomali SDK |
-| `data.ioc_type` | Type hint for Cyble IOC values; the SDK validates the final Anomali iType |
-| `data.hosting_ip` | Additional IOC candidate |
-| `data.first_seen`, `data.last_seen`, `first_seen_on`, `last_seen_on` | Observable source timestamps and bulletin context |
-| `data.confident_rating`, `data.risk_rating`, `data.behaviour_tags`, `data.ioc_attack_name`, `data.reference_link` | Preserved in the full JSON report body; risk/confidence labels are not converted into an Anomali confidence score |
-| `cve` and every other structured Cyble field | Preserved under the original field name in the report's sanitized JSON body |
-| Recognized IOC values anywhere in the record | Validated and attached as native ThreatStream Indicators |
+| `CYBLE_API_TOKEN` | Cyble API Bearer token |
+| `CYBLE_COMPANY_UUID` | Company scope for alert queries |
+| `CYBLE_SERVICES` | `all`, or a comma-separated list such as `iocs,new_vulnerability` |
+| `TS_USERNAME`, `TS_API_KEY` | ThreatStream API credentials |
+| `TS_API_URL` | Your ThreatStream API base URL |
+| `TS_FEED_ID`, `TS_FEED_NAME` | Your provisioned feed identity |
 
-Cyble's live `iocs` payload can include service data encoded as JSON. The connector parses structured JSON strings and preserves the resulting fields in the report body. Non-JSON free-text content is omitted; sensitive values are replaced with markers while field names remain. The report body is rejected rather than silently truncated if it exceeds `CYBLE_MAX_REPORT_BYTES`.
-
-`config/field-map.example.json` supports dotted paths, `[*]` array expansion, and a per-service override. Example:
-
-```json
-{
-  "default": {
-    "ioc_rules": [
-      {"value_path": "data.indicators[*].value", "type_path": "data.indicators[*].type"}
-    ]
-  },
-  "services": {
-    "my_service": {
-      "ioc_rules": [
-        {"value_path": "data.confirmed_non_sensitive_field", "type": "url"}
-      ],
-      "context_paths": [
-        {"path": "data.confirmed_non_sensitive_label", "label": "Service context"}
-      ]
-    }
-  }
-}
-```
-
-The `my_service` names above are examples, not Cyble fields. Use actual paths from the corresponding service response when IOC values use nonstandard field names. `context_paths` adds selected safe fields to the report summary; every structured field is already preserved in the embedded alert JSON.
-
-### Data handling
-
-- Visibility is fixed to private and TLP defaults to amber.
-- `FALSE_POSITIVE` alerts are excluded by the Cyble query.
-- Email addresses, usernames, passwords, tokens, cookies, card/SSN/phone values and other recognized sensitive fields are redacted from report JSON; their Cyble field names remain visible. Sensitive values and non-public IP addresses are excluded from observable extraction.
-- Structured `dataMessage` content is fetched in memory by default, sanitized, and included in each report body; set `CYBLE_WITH_DATA_MESSAGE=false` for metadata-only polling. Non-JSON free-text content fields are represented by omission markers. Descriptions are retained after common email, SSN, payment-card, and credential-assignment redaction.
-- A sanitized alert larger than `CYBLE_MAX_REPORT_BYTES` or deeper than the supported nesting limit fails the poll. The connector does not truncate it or advance its checkpoint, so the condition can be reviewed and corrected.
-- Cyble risk ratings and confidence labels are preserved as text context. They are not treated as Anomali source confidence because those scales are not documented as equivalent.
-- The connector is read-only against Cyble. It does not update Cyble alert status or add comments.
-
-## Requirements
-
-- Python 3.10 or 3.11.
-- An Anomali ThreatStream feed configured with the Feed SDK 2.8.1 runtime.
-- Cyble Alerts API v2 access, the tenant company UUID, and network access to `bifrost.cyble.ai`.
-- Outbound HTTPS to the configured ThreatStream API endpoint.
-
-The supplied Anomali wheel is proprietary and intentionally not included. Obtain it through Anomali's approved channel, keep it outside this repository, and install it in the feed runtime. Then install the connector dependency:
+Inspect the version and Cyble catalogue, preview mapping, then configure the scheduled command:
 
 ```bash
-python3 -m pip install /secure/path/anomali_feedsdk-2.8.1-py3-none-any.whl
-python3 -m pip install -r requirements.txt
+.venv/bin/python source/cyble_anomali_feed.py --version
+
+# Read-only service discovery; no ThreatStream write.
+.venv/bin/python source/cyble_anomali_feed.py --list-services
+
+# Fetch at most one alert per service and validate SDK models locally.
+# No ThreatStream ingestion or checkpoint write.
+.venv/bin/python source/cyble_anomali_feed.py --dry-run
+
+# Run one ingestion cycle; schedule this command in the feed runner.
+.venv/bin/python source/cyble_anomali_feed.py
 ```
 
-Do not add the wheel, SDK source, Cyble API PDF, or tenant data to GitHub.
+`all` selects catalogue entries with `allowAlerts=true`. Discovery does not prove subscription entitlement or a working payload for every service. A permissions or schema error must be resolved before its checkpoint can progress. Start with the [deployment guide](docs/deployment.md) for feed permissions, rollout, configuration, and the v0.3-to-v0.4 checkpoint migration.
 
-## Configuration
+## Where every Cyble field goes
 
-Supply these values through the Anomali feed runner's secret/environment configuration. Do not commit a populated `.env` file.
+| Cyble content | ThreatStream destination |
+|---|---|
+| Alert identity | Stable bulletin identity and `original_source_id` |
+| Service, status, severity, timestamps | Bulletin summary and original fields in its JSON body |
+| Every structured field, nested object, array, and parseable JSON data string | Sanitized JSON in the bulletin body, under the original field names |
+| Recognized IP, domain, URL, and hash values | Native Indicators associated with the bulletin, after validation |
+| Service-specific IOC paths | Configurable extraction via the [field map](config/field-map.example.json) |
+| Credentials and recognized personal-data values | Redaction markers; field names remain |
+| Raw unstructured content/data strings | Omission markers |
 
-| Variable | Required | Purpose |
-|---|---:|---|
-| `CYBLE_API_TOKEN` | Yes | Cyble Bearer token |
-| `CYBLE_COMPANY_UUID` | Yes | Tenant scope required by the live Alerts API endpoint |
-| `CYBLE_SERVICES` | Yes | Explicit comma-separated service allowlist, such as `iocs,new_vulnerability` |
-| `TS_USERNAME` | Yes | ThreatStream API username |
-| `TS_API_KEY` | Yes | ThreatStream API key |
-| `TS_API_URL` | Yes | ThreatStream API base URL |
-| `TS_FEED_ID` | Yes | Feed ID provisioned in ThreatStream |
-| `TS_FEED_NAME` | Yes | Feed name provisioned in ThreatStream |
-| `CYBLE_INITIAL_LOOKBACK_HOURS` | No | First-run window; default 24, maximum 8,760 |
-| `CYBLE_PAGE_SIZE` | No | Default 200; maximum 200 with detailed payloads or 2,000 without |
-| `CYBLE_MAX_PAGES_PER_SERVICE` | No | Per-service/per-date-field page guard; default 100 |
-| `CYBLE_OVERLAP_SECONDS` | No | Replay boundary window; default 300 seconds |
-| `CYBLE_SYNC_UPDATED_ALERTS` | No | Poll `updated_at` as well as `created_at`; default true |
-| `CYBLE_WITH_DATA_MESSAGE` | No | Fetch typed service data in memory; default true |
-| `CYBLE_THREAT_TYPE` | No | Anomali threat type; default `malware`, review against your feed semantics |
-| `CYBLE_TLP` | No | `amber`, `green`, `red`, or `white`; default `amber` |
-| `CYBLE_FIELD_MAP_PATH` | No | Path to a customized JSON mapping file |
-| `CYBLE_MAX_RUN_MINUTES` | No | Stop before the SDK runtime limit; default 20 |
-| `CYBLE_MAX_REPORT_BYTES` | No | Maximum sanitized alert JSON size in a report body; default 4 MiB. Oversized records fail the poll without checkpoint advancement. |
+**Preserving a field in bulletin JSON does not create a native ThreatStream field.** Arbitrary Cyble fields remain available as context; native observable mapping is limited to supported types. Cyble risk/confidence labels are retained without inventing an equivalent Anomali score. Redaction is conservative and pattern based; review new service schemas before broad rollout.
 
-The Cyble `/services` endpoint is available for discovery. To list the services accessible to the configured token:
+False-positive records remain visible for context and status tracking. They produce no new Indicators. Previously associated or shared ThreatStream indicators are not automatically deleted or revoked when an alert changes status.
 
-```bash
-python3 source/cyble_anomali_feed.py --list-services
-```
+Accepted report IDs are checked before progress is saved. Native IOC CSV ingestion remains asynchronous, and the hosted SDK cache can suppress refreshed attributes; verify final report and indicator state in your tenant.
 
-`CYBLE_SERVICES` may include any service entitled to the API token. Choose the allowlist deliberately, especially for credential-bearing services. The connector preserves every structured field for those services while redacting recognized credential and personal-data values; raw unstructured content is omitted.
+Large or excessively nested records stop their poll window without silent truncation. Full details, supported response envelopes, custom paths, and data handling are in [field mapping](docs/api-mapping.md).
 
-## Scheduling and operation
+## Repository guide
 
-Configure the Anomali feed's engine/schedule to run this command at the desired interval:
+| Path | Purpose |
+|---|---|
+| [`source/`](source/) | Cyble API client and Feed SDK ingestion entry point |
+| [`config/field-map.example.json`](config/field-map.example.json) | Common paths and per-service IOC/context rules |
+| [`.env.example`](.env.example) | Configuration names and defaults |
+| [`docs/deployment.md`](docs/deployment.md) | Installation, scheduling, and upgrade instructions |
+| [`docs/operations.md`](docs/operations.md) | Checkpoints, recovery, and troubleshooting |
+| [`docs/validation.md`](docs/validation.md) | Validation evidence and remaining integration checks |
+| [`SECURITY.md`](SECURITY.md) | Private vulnerability reporting and data handling |
 
-```bash
-python3 source/cyble_anomali_feed.py
-```
+Use the [Cyble API portal](https://cyble.ai/utilities/access-apis?tab=alerts-api-v2) for vendor API documentation. Report reproducible connector issues with synthetic data through the [issue templates](https://github.com/Prank1004/cyble-anomali-threatstream/issues/new/choose).
 
-A run fails without advancing its watermark if an API request fails, the response schema is unrecognized, or a configured page/time guard is reached. The next scheduled invocation retries from the previous checkpoint with overlap; Anomali's feed model cache and stable alert IDs handle replay.
+## License and trademarks
 
-The connector uses verified TLS for Cyble and ThreatStream, bounded retries for transient Cyble errors, and the SDK's configured proxy settings. Logs contain counts and service names only, not response bodies, IOC values, or credentials.
-
-## Cyble documentation
-
-- [Cyble Vision API access](https://cyble.ai/utilities/access-apis?tab=alerts-api-v2) — Alerts API v2 access and documentation.
-
-This is an independent community connector. It is not endorsed or supported by Cyble or Anomali.
+Connector code is licensed under [MIT](LICENSE). The Anomali SDK retains its separate proprietary license. Vendor logos are unmodified remote assets from the official websites, used to identify the connected products; they are not covered by this repository's MIT license. See [NOTICE](NOTICE.md) and [logo sources](assets/README.md).

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security reporting guidance
+    url: https://github.com/Prank1004/cyble-anomali-threatstream/blob/main/SECURITY.md
+    about: Arrange private disclosure for suspected security issues.
+  - name: Operator runbook
+    url: https://github.com/Prank1004/cyble-anomali-threatstream/blob/main/docs/operations.md
+    about: Check configuration, checkpoint, and recovery guidance.

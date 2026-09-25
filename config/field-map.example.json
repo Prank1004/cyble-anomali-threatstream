@@ -1,0 +1,27 @@
+{
+  "default": {
+    "ioc_rules": [
+      {
+        "value_path": "ioc",
+        "type_path": "data.ioc_type"
+      },
+      {
+        "value_path": "data.ioc",
+        "type_path": "data.ioc_type"
+      },
+      {
+        "value_path": "data.hosting_ip",
+        "type": "ip"
+      },
+      {
+        "value_path": "indicators[*].value",
+        "type_path": "indicators[*].type"
+      },
+      {
+        "value_path": "observables[*].value",
+        "type_path": "observables[*].type"
+      }
+    ]
+  },
+  "services": {}
+}

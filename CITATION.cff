@@ -1,0 +1,9 @@
+cff-version: 1.2.0
+message: "Please cite this software when using the Cyble Vision Anomali ThreatStream feed connector."
+title: "Cyble Vision Alerts API v2 to Anomali ThreatStream Feed"
+version: 0.2.0
+type: software
+authors:
+  - name: Prank1004
+license: MIT
+repository-code: "https://github.com/Prank1004/cyble-anomali-threatstream"

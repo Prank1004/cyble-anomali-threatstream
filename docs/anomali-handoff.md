@@ -1,6 +1,6 @@
 # Anomali engineering handoff
 
-**Candidate:** v0.4.1, 2026-09-26. **Purpose:** vendor technical review and staging acceptance. Production acceptance remains open.
+**Candidate:** v0.5.0, 2026-09-26. **Purpose:** vendor technical review and staging acceptance. Production acceptance remains open.
 
 ## Integration contract
 
@@ -9,14 +9,23 @@
 | Source | Cyble Vision Alerts API v2 over verified HTTPS; token and company scope injected at runtime |
 | Execution | Scheduled Python process on a POSIX host; one active runner per ThreatStream feed |
 | Destination | Private `tipreport` bulletins plus supported related Indicators through Feed SDK 2.8.1 |
-| Full alert context | Structured fields preserved as sanitized JSON in the bulletin; arbitrary fields do not become native ThreatStream attributes |
-| Data policy | Known sensitive values redacted, unstructured source content omitted, remote image downloads disabled |
-| Incremental state | Independent creation/update cursors and fixed pending windows in feed configuration; progress saved only after report acceptance |
+| Full alert context | Every returned alert field and value preserved in the private bulletin JSON body by default, including source credentials, personal data, and raw text; arbitrary fields do not become native ThreatStream attributes |
+| Data policy | `CYBLE_CONTENT_MODE=full` by default; optional `redacted` retains the previous policy. Summary and native IOC mapping remain sanitized. Runtime authentication secrets are never added to reports or logs |
+| Files and links | Returned attachment metadata and URLs preserved; no binary attachment, image, or linked-content downloads |
+| Incremental state | Independent creation/update cursors and fixed pending windows in feed configuration; progress saved only after report acceptance; content-mode changes trigger a bounded lookback replay |
 | Delivery limits | Replay may repeat updates; native IOC processing is asynchronous; offset pagination is not a frozen source snapshot |
 
 The licensed SDK and tenant credentials must be provisioned separately. Public fixtures are synthetic. Deployment instructions, field destinations, and recovery behavior are in [deployment](deployment.md), [mapping](api-mapping.md), and [operations](operations.md).
 
-## Final QA changes
+## Changes in this candidate
+
+- Preserve original keys, types, strings, nulls, arrays, and objects from every returned alert in the private body in full mode. JSON-encoded source strings remain strings.
+- Retain exposed passwords, tokens, personal data, internal IPs, and raw source text as alert context. They are not automatically classified as malicious native Indicators.
+- Require detailed source responses (`CYBLE_WITH_DATA_MESSAGE=true`) in full mode, and reject oversized or over-deep records instead of truncating them.
+- Replay the configured initial lookback after a content-mode change, using stable alert identity to update recent bulletins. Older history requires a planned replay.
+- Keep authentication secrets and source content out of public fixtures, logs, and GitHub material. Only synthetic examples belong in this repository.
+
+### Retained v0.4.1 QA protections
 
 - Validate pagination metadata inside supported service buckets so a short page cannot silently finish a declared incomplete result.
 - Reject ambiguous response envelopes whose wrapper IDs could conceal nested alerts.
@@ -42,10 +51,10 @@ Do not force-install newer versions over the SDK's exact pins and call that a va
 ## Decisions requested from Anomali
 
 1. **SDK and dependency support:** Confirm SDK 2.8.1 support for the target runner, provide a patched dependency set, and review the adapter that bypasses constructor CLI/logging side effects and bounds the CSV upload timeout.
-2. **Destination contract:** Confirm `tipreport` support, native iTypes and TLP values, maximum bulletin body size, report identity/update behavior, asynchronous IOC processing, and hosted cache effects on refreshed Indicator attributes.
+2. **Destination contract:** Confirm `tipreport` support, native iTypes and TLP values, maximum bulletin body size, report identity/update behavior, asynchronous IOC processing, and hosted cache effects on refreshed Indicator attributes. Verify that the stored private bulletin JSON preserves the full source values and types, and that tenant access, indexing, export, audit, and retention controls suit this content.
 3. **Runner and acceptance:** Confirm feed-configuration update permissions, durable state semantics, singleton scheduling, external process termination, private temporary CSV storage/cleanup on failed uploads, and staging acceptance evidence for initial ingest, repeat ingest, source updates, and interrupted-run recovery.
 
-Cyble should separately confirm subscriptions and response shapes for the required services. Live detail samples were inspected for `iocs` and `new_vulnerability`; the bounded `suspicious_domains` probe returned an error. Catalogue discovery is not evidence that every service is entitled or fully mapped to native observables.
+Cyble should separately confirm subscriptions and response shapes for the required services. `all` covers alert-capable services accessible through Alerts API v2; separate product APIs and fields absent from responses are outside this connector's collection scope. Live detail samples were inspected for `iocs` and `new_vulnerability`; the bounded `suspicious_domains` probe returned an error. Catalogue discovery is not evidence that every service is entitled or fully mapped to native observables.
 
 ## Staging acceptance record
 
@@ -57,6 +66,8 @@ Complete this privately with the vendors; never post tenant values or real alert
 | Public Python 3.10/3.11 regression checks | See GitHub Actions for the candidate commit |
 | Known nonempty alert delivered to the target private feed | Pending |
 | Bulletin body, classification, TLP, relationships, and native IOC completion verified | Pending |
+| Full source values/types, sensitive-field retention, and private reader/export controls verified | Pending |
+| Content-mode change updates recent bulletins through bounded replay | Pending |
 | Replay, updated alert, false-positive handling, and SDK cache behavior verified | Pending |
 | Interrupted window resumes and repeated scheduled cycles succeed | Pending |
 | Vendor-approved dependency remediation accepted | Pending |

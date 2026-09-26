@@ -72,7 +72,7 @@ def _check_envelope(value: dict[str, Any]) -> None:
         raise CybleAPIError("Cyble API returned a partial response; the checkpoint must not advance.")
 
 
-def _extract_alert_rows(payload: dict[str, Any], services: list[str]) -> list[dict[str, Any]]:
+def _extract_alert_rows(payload: dict[str, Any], services: list[str], *, preserve_fields: bool = False) -> list[dict[str, Any]]:
     """Find alert records in documented/common envelopes; reject unknown schemas."""
     def visit(value: Any, depth: int = 0) -> list[dict[str, Any]]:
         if depth > 8:
@@ -96,7 +96,7 @@ def _extract_alert_rows(payload: dict[str, Any], services: list[str]) -> list[di
                 for row in visit(value[service], depth + 1):
                     if row.get("service") not in (None, "", service):
                         raise CybleAPIError("Cyble Alerts API returned a conflicting service label.")
-                    rows.append(dict(row, service=service))
+                    rows.append(dict(row) if preserve_fields else dict(row, service=service))
             return rows
         if len(containers) != 1:
             raise CybleAPIError("Cyble Alerts API response shape is ambiguous or unrecognized; no poll checkpoint was saved.")
@@ -186,7 +186,7 @@ class CybleClient:
             "Accept": "application/json",
             "Content-Type": "application/json",
             "Referer": "https://cyble.ai/",
-            "User-Agent": "cyble-anomali-threatstream-feed/0.4.1",
+            "User-Agent": "cyble-anomali-threatstream-feed/0.5.0",
         }
         retryable = {429, 500, 502, 503, 504}
         url = API_ROOT + path
@@ -308,7 +308,9 @@ class CybleClient:
         payload = self._request("POST", ALERTS_PATH, body)
         if not isinstance(payload, dict):
             raise CybleAPIError("Cyble Alerts API returned an unsupported JSON shape.")
-        rows = _extract_alert_rows(payload, services)
+        # The runner requests one service per page and supplies that context to
+        # the mapper. Do not insert/overwrite a source field in its full payload.
+        rows = _extract_alert_rows(payload, services, preserve_fields=len(set(services)) == 1)
         for row in rows:
             service = row.get("service")
             if service not in (None, "") and service not in services:

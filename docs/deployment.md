@@ -1,6 +1,6 @@
 # Deployment
 
-This connector runs as a scheduled Anomali Feed SDK process. Each invocation polls a bounded Cyble time window and writes private ThreatStream bulletins with associated Indicators. Your feed runner owns its schedule, secrets, and process lifecycle.
+This connector runs as a scheduled Anomali Feed SDK process. Each invocation polls a bounded Cyble time window and writes private ThreatStream bulletins with associated Indicators. Full source content is retained in the private bulletin body by default, including exposed credentials and personal data returned by Cyble. Your feed runner owns its schedule, authentication secrets, and process lifecycle.
 
 ## Prerequisites
 
@@ -43,30 +43,33 @@ Inject credentials from the feed runtime's secret store. The entry point reads e
 | `TS_API_URL` | API base URL for your ThreatStream deployment |
 | `TS_FEED_ID` / `TS_FEED_NAME` | Existing feed identity in ThreatStream |
 
-`CYBLE_SERVICES=all` selects catalogue entries where `allowAlerts` is exactly `true`; it is the setting in `.env.example`. Catalogue presence is not proof of entitlement. A service that rejects your token must be investigated; it is not treated as an empty feed. Choose an explicit list when your subscription or rollout scope covers a subset.
+`CYBLE_SERVICES=all` selects catalogue entries where `allowAlerts` is exactly `true`; it is the setting in `.env.example`. It covers alert-capable services exposed by Alerts API v2 within your accessible scope. It does not add separate Cyble product APIs. Catalogue presence is not proof of entitlement. A service that rejects your token must be investigated; it is not treated as an empty feed. Choose an explicit list when your subscription or rollout scope covers a subset.
 
 ### Ingestion settings
 
 | Setting | Default | Purpose |
 |---|---|---|
-| `CYBLE_INITIAL_LOOKBACK_HOURS` | `24` | Initial history when a service has no saved cursor |
-| `CYBLE_PAGE_SIZE` | `200` | Page size; maximum 200 with detailed payloads, 2,000 without |
+| `CYBLE_CONTENT_MODE` | `full` | Preserve complete source alert values in the private body; `redacted` retains the prior sanitization policy |
+| `CYBLE_INITIAL_LOOKBACK_HOURS` | `24` | Initial history for a new service and bounded replay after changing content mode |
+| `CYBLE_PAGE_SIZE` | `200` | Page size; maximum 200 with detailed payloads, 2,000 for metadata-only queries in redacted mode |
 | `CYBLE_MAX_PAGES_PER_SERVICE` | `100` | Page guard for each service/date window |
 | `CYBLE_WINDOW_MINUTES` | `60` | Maximum forward cursor step, from 1 to 1,440 minutes; queried span also includes overlap |
 | `CYBLE_OVERLAP_SECONDS` | `300` | Replays boundary records; must be smaller than the configured window |
 | `CYBLE_SETTLE_SECONDS` | `60` | Keeps polling end behind current time for stability; 0 to 3,600 seconds |
 | `CYBLE_SYNC_UPDATED_ALERTS` | `true` | Polls `updated_at` to ingest changes to existing alerts |
-| `CYBLE_WITH_DATA_MESSAGE` | `true` | Requests structured service details in memory |
+| `CYBLE_WITH_DATA_MESSAGE` | `true` | Requests service details; must remain `true` in full mode |
 | `CYBLE_THREAT_TYPE` | `malware` | ThreatStream Indicator classification; review its meaning for your services |
 | `CYBLE_TLP` | `amber` | Report and Indicator marking: `amber`, `green`, `red`, or `white` |
 | `CYBLE_FIELD_MAP_PATH` | Bundled example | Custom mapping file with defaults and per-service overrides |
 | `CYBLE_MAX_RUN_MINUTES` | `20` | Cooperative run budget, checked between pages; does not interrupt an active SDK call |
-| `CYBLE_MAX_REPORT_BYTES` | `4194304` | Maximum sanitized alert JSON size; excess fails the window without truncating |
+| `CYBLE_MAX_REPORT_BYTES` | `4194304` | Maximum serialized alert JSON size; excess fails the window without truncating |
 | `CYBLE_LOCK_DIR` | Private user temp directory | Optional private directory for the POSIX process lock |
 | `TS_BATCH_SIZE` | `1000` | Feed SDK batch size |
 | `LOG_LEVEL` | `INFO` | Connector logging level; SDK payload logging remains suppressed |
 
-Set a lookback appropriate to your alert volume. Large backfills require multiple scheduled runs and enough API quota. Reducing data detail with `CYBLE_WITH_DATA_MESSAGE=false` reduces collected fields; leave it enabled when you need the full structured alert payload.
+Set a lookback appropriate to your alert volume. Large backfills require multiple scheduled runs and enough API quota. Full mode rejects `CYBLE_WITH_DATA_MESSAGE=false`; metadata-only requests cannot preserve complete service detail. Optional redacted mode permits reduced-detail queries, with that collection limit made explicit.
+
+Source exposure credentials are data intentionally retained in the private bulletin body in full mode. Connector authentication credentials belong only in the runtime secret store. Keep both source data and authentication secrets out of logs, public GitHub material, support screenshots, and test fixtures. Full mode does not download binary attachments or linked files; it retains their metadata and URLs when returned in the alert.
 
 Preview the configuration's source access and mapping with `--dry-run`. It fetches at most one alert per selected service and constructs SDK models locally, without calling ThreatStream ingestion or writing checkpoints. It still needs Cyble access and the installed SDK. An empty preview does not establish the mapping for that service.
 
@@ -92,7 +95,7 @@ Perform the following in a private staging feed before broad service rollout:
 
 1. Use `--list-services` with the Cyble credentials to inspect the catalogue.
 2. Start with a service and time window known to contain an alert. A zero-record run alone does not validate ingestion.
-3. Run `--dry-run`, then an ingestion cycle. Verify the corresponding private bulletin in ThreatStream: identity, timestamps, redacted JSON fields, and expected native Indicators after asynchronous ingestion completes.
+3. Run `--dry-run`, then an ingestion cycle. Verify the corresponding private bulletin in ThreatStream: identity, timestamps, original field values and types in full mode (or expected redactions in redacted mode), and native Indicators after asynchronous ingestion completes. Check access controls using the intended reader accounts.
 4. Repeat the cycle and inspect replay behavior, checkpoint progress, and whether the hosted SDK cache permits refreshed attributes.
 5. Change an alert status through your normal Cyble workflow and confirm an updated bulletin arrives. For false positives, check that no new Indicators are created; existing indicator disposition remains an analyst/tenant decision.
 6. Confirm a failed or interrupted run retries its incomplete service window without advancing that window's cursor.
@@ -104,6 +107,10 @@ The repository's offline checks and SDK contract checks do not replace these ten
 
 Pause scheduling and wait for the active process to finish. Record the deployed commit, preserve the feed configuration through your approved administrative process, and install the new code/dependencies in a separate runtime directory. Keep credentials and saved checkpoints outside source control.
 
-Version 0.4 stores progress under `cyble_state_v1`, including a hash of the source scope, per-service creation/update cursors, and pending fixed windows. It deliberately does not reuse the v0.3 global watermarks. On upgrade it replays `CYBLE_INITIAL_LOOKBACK_HOURS` (24 hours by default), using stable report names for repeat ingestion. A newly enabled service also starts from its own configured lookback. Use a separate ThreatStream feed for another Cyble tenant; a source-scope mismatch is rejected.
+Version 0.5.0 defaults to `CYBLE_CONTENT_MODE=full`. Set `CYBLE_CONTENT_MODE=redacted` explicitly to keep the previous output policy. The state records the selected content mode; changing modes schedules a bounded replay of `CYBLE_INITIAL_LOOKBACK_HOURS` (24 hours by default). Recent alerts are ingested again using their existing stable identities so the private bulletin body can be updated. This does not restore the full source content for every older bulletin automatically. Plan a separate historical replay for records outside the selected lookback, and verify actual update behavior in the tenant.
+
+Progress remains under `cyble_state_v1`, with a hash of the source scope, per-service creation/update cursors, and pending fixed windows. Existing pre-v0.5 state represents the redacted policy. A newly enabled service starts from its own configured lookback. The v0.3 global watermarks are not reused; upgrading from that format also starts from the configured lookback. Use a separate ThreatStream feed for another Cyble tenant; a source-scope mismatch is rejected.
+
+Switching back to redacted mode changes subsequent and replayed bulletin bodies. It does not erase historical content from platform audit records, exports, backups, or reports outside the replay interval; manage those through ThreatStream's retention controls.
 
 Deploy the new runtime path, resume scheduling, and check the first cycle plus cursor progress. Consult [operations](operations.md) before changing cursor values or replaying history. Restoring an older binary is not sufficient when its checkpoint format differs; restore a compatible feed configuration or use a separately provisioned staging feed. Replaying previously ingested windows can repeat report updates, so verify tenant deduplication behavior.

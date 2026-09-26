@@ -10,7 +10,7 @@ Contributions should preserve scheduled, read-only Cyble polling, private Threat
 4. Run the checks used by [CI](.github/workflows/ci.yml), and update relevant deployment/mapping documentation.
 5. Describe the user-visible change, verification performed, and remaining live-integration limits in the pull request.
 
-Do not add the SDK wheel/source, Cyble API guide, live tenant exports, tokens, tenant identifiers, or personal data to commits, issues, pull requests, screenshots, or fixtures. Use invented values such as reserved example domains and documentation IP addresses. Redaction must happen before all output paths, including summary context and explicit IOC rules.
+Do not add the SDK wheel/source, Cyble API guide, live tenant exports, tokens, tenant identifiers, or personal data to commits, issues, pull requests, screenshots, or fixtures. Use invented values such as reserved example domains and documentation IP addresses. Full mode preserves source alert values only in the private bulletin body. Summary context and native IOC rules must use a sanitized derivative; logs must never expose source bodies or authentication secrets.
 
 Run the focused suite with:
 
@@ -24,7 +24,7 @@ The real SDK contract checks run when the separately installed Anomali SDK is av
 
 State the service slug and the shape of its fields. Separate three claims: fields preserved in report JSON, fields extracted into native Indicators, and behavior verified against a real vendor runtime. A schema taken from one service does not establish another service's schema.
 
-Include positive and negative synthetic cases. Consider false positives, private IPs, email/credential fields, JSON strings, malformed responses, pagination, and a retry after incomplete ingestion. Do not infer maliciousness simply because a string is a domain or URL.
+Include positive and negative synthetic cases. Verify original keys, types, values, raw strings, nulls, and nested containers survive a full-mode JSON round trip, including invented credential fields. Verify redacted mode retains its documented policy. Consider false positives, private IPs, email/credential fields, JSON strings, malformed responses, pagination, mode-change replay, and a retry after incomplete ingestion. Do not infer maliciousness simply because a string is a domain or URL.
 
 ## Review expectations
 

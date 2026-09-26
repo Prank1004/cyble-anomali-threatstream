@@ -162,6 +162,17 @@ class CheckpointState:
         stream["cursor"] = pending["end"]
         del stream["pending"]
 
+    def rewind(self, start: datetime) -> None:
+        """Replay a changed content policy without skipping older unfinished work."""
+        start = _utc_datetime(start)
+        if start > datetime.now(UTC):
+            raise ValueError("Cyble replay start must not be in the future.")
+        for fields in self._state["streams"].values():
+            for stream in fields.values():
+                cursor = min(_parse_timestamp(stream["cursor"]), start)
+                stream["cursor"] = _iso(cursor)
+                stream.pop("pending", None)
+
     def shrink_window(self, service: str, date_field: str, min_seconds: int = 60) -> bool:
         """Split an unfinished high-volume window without advancing its cursor."""
         if not isinstance(min_seconds, int) or isinstance(min_seconds, bool) or not 1 <= min_seconds <= 366 * 86400:

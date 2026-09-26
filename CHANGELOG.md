@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.0 — 2026-09-26
+
+- Default to `CYBLE_CONTENT_MODE=full`, preserving every returned source field and value in the private bulletin body, including exposed credentials, personal data, raw text, and original JSON-encoded strings.
+- Keep native Indicator and summary mapping on a sanitized derivative; retained contextual values are not automatically classified as malicious Indicators.
+- Retain the prior sanitization policy through optional `CYBLE_CONTENT_MODE=redacted`.
+- Require `CYBLE_WITH_DATA_MESSAGE=true` in full mode; fail oversized or over-deep records without truncation.
+- Replay the configured initial lookback after content-mode changes so recent bulletins can be updated using stable source identities. Older history still requires a planned replay.
+- Document source-content retention, private access expectations, attachment boundaries, and vendor acceptance checks. Runtime authentication secrets and real source payloads remain excluded from public material and logs.
+
 ## 0.4.1 — 2026-09-26
 
 - Final QA: enforce nested service-bucket pagination metadata and reject ambiguous ID-bearing response wrappers.

@@ -106,7 +106,13 @@ class CybleClientTests(unittest.TestCase):
         self.assertNotIn("countOnly", kwargs["json"])
         self.assertTrue(kwargs["verify"])
         self.assertFalse(kwargs["allow_redirects"])
-        self.assertTrue(kwargs["headers"]["User-Agent"].endswith("/0.4.1"))
+        self.assertTrue(kwargs["headers"]["User-Agent"].endswith("/0.5.0"))
+
+    def test_single_service_payload_preserves_missing_empty_and_null_service_fields(self):
+        for fields in ({}, {"service": ""}, {"service": None}, {"service": "iocs"}):
+            original = {"id": "synthetic-source", **fields, "data": {"source_key": "unchanged"}}
+            with self.subTest(fields=fields):
+                self.assertEqual(self.fetch({"data": {"iocs": [original]}}), [original])
 
     def test_rejects_short_page_that_claims_more_data(self):
         for metadata in ({"total": 3}, {"hasMore": True}, {"next": True}, {"partial": True}):

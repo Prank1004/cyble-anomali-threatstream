@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Structured non-sensitive fields already go into the bulletin JSON. Use this form for an extraction rule, a schema the parser does not accept, or a missing native mapping. Use invented values only.
+        Full mode already preserves every returned source field in the private bulletin JSON, including sensitive values. Native Indicators use a sanitized derivative. Use this form for an extraction rule, a schema the parser does not accept, or a missing native mapping. Use invented values only; never paste private bulletin content here.
   - type: input
     id: service
     attributes:

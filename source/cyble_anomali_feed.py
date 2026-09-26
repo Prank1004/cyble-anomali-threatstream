@@ -20,7 +20,7 @@ from cyble_mapping import DEFAULT_MAX_REPORT_BYTES, VALID_TLP, _alert_identifier
 from cyble_sdk import construct_sdk, ingest_reports as _ingest_reports, quiet_sdk_logger, require_sdk, sdk_models
 from cyble_state import CheckpointState, poll_lock
 
-VERSION = "0.4.1"
+VERSION = "0.5.0"
 LOGGER = logging.getLogger("cyble_anomali_feed")
 
 
@@ -162,7 +162,12 @@ def _settings() -> dict[str, Any]:
         "sync_updated": _env_bool("CYBLE_SYNC_UPDATED_ALERTS", True),
         "threat_type": os.environ.get("CYBLE_THREAT_TYPE", "malware").strip().lower(),
         "tlp": os.environ.get("CYBLE_TLP", "amber").strip().lower(),
+        "content_mode": os.environ.get("CYBLE_CONTENT_MODE", "full").strip().lower(),
     }
+    if settings["content_mode"] not in {"full", "redacted"}:
+        raise ValueError("CYBLE_CONTENT_MODE must be full or redacted.")
+    if settings["content_mode"] == "full" and not settings["with_data"]:
+        raise ValueError("Full content ingestion requires CYBLE_WITH_DATA_MESSAGE=true.")
     if settings["with_data"] and settings["page_size"] > 200:
         raise ValueError("Keep CYBLE_PAGE_SIZE at 200 or less when CYBLE_WITH_DATA_MESSAGE=true.")
     if settings["overlap"] >= settings["window"]:
@@ -202,7 +207,7 @@ def _poll_window(client: Any, feed: Any, service: str, date_field: str,
         seen_ids.update(page_ids)
         reports = [
             _map_alert(alert, service, Indicator, Report, settings["threat_type"], settings["tlp"],
-                       field_map, settings["max_report_bytes"])
+                       field_map, settings["max_report_bytes"], content_mode=settings["content_mode"])
             for alert in alerts
         ]
         if time.monotonic() >= deadline:
@@ -235,6 +240,13 @@ def run_poll() -> None:
             feed.feed_config, hashlib.sha256(company_uuid.encode("utf-8")).hexdigest(),
             _initial_start(cutoff), settings["window"], settings["overlap"],
         )
+        previous_mode = feed.feed_config.get("cyble_content_mode", "redacted")
+        if previous_mode not in {"full", "redacted"}:
+            raise ValueError("Saved Cyble content mode is invalid; review feed configuration.")
+        if previous_mode != settings["content_mode"]:
+            state.rewind(_initial_start(cutoff))
+            LOGGER.info("Content mode changed; replaying the configured lookback with stable report identities.")
+        feed.feed_config["cyble_content_mode"] = settings["content_mode"]
         Indicator, Report = sdk_models()
         field_map = _load_field_map()
         fields = ["created_at", "updated_at"] if settings["sync_updated"] else ["created_at"]
@@ -294,7 +306,7 @@ def dry_run() -> None:
                 with_data_message=settings["with_data"], date_field="created_at",
             )
             reports = [_map_alert(alert, service, Indicator, Report, settings["threat_type"], settings["tlp"],
-                                  field_map, settings["max_report_bytes"]) for alert in alerts]
+                                  field_map, settings["max_report_bytes"], content_mode=settings["content_mode"]) for alert in alerts]
             if any(getattr(report, "threatmodel", None) is None for report in reports):
                 raise RuntimeError("SDK report validation failed.")
             LOGGER.info("Dry run service=%s sampled_alerts=%d mapped_observables=%d", _safe_tag(service),

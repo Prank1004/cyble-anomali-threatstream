@@ -102,6 +102,29 @@ class CheckpointTests(unittest.TestCase):
         checkpoint.complete("iocs", "created_at", window[1])
         self.assertIsNone(checkpoint.window("iocs", "created_at", cutoff))
 
+    def test_content_policy_rewind_preserves_older_work_and_replays_completed_history(self):
+        config = {}
+        checkpoint = state(config)
+        for _ in range(3):
+            end = checkpoint.window("iocs", "created_at", NOW)[1]
+            checkpoint.complete("iocs", "created_at", end)
+        checkpoint.window("iocs", "created_at", NOW)
+        checkpoint.window("github", "created_at", NOW)
+        checkpoint.rewind(INITIAL + timedelta(hours=1))
+        self.assertEqual(checkpoint.cursor("iocs", "created_at"), INITIAL + timedelta(hours=1))
+        self.assertEqual(checkpoint.cursor("github", "created_at"), INITIAL)
+        self.assertTrue(all("pending" not in stream for fields in config[STATE_KEY]["streams"].values() for stream in fields.values()))
+        self.assertEqual(checkpoint.window("iocs", "created_at", NOW)[0], "2024-01-01T00:55:00.000000Z")
+
+    def test_replay_rejects_future_time_without_mutation(self):
+        config = {}
+        checkpoint = state(config)
+        checkpoint.window("iocs", "created_at", NOW)
+        before = copy.deepcopy(config)
+        with self.assertRaises(ValueError):
+            checkpoint.rewind(datetime.now(UTC) + timedelta(days=1))
+        self.assertEqual(config, before)
+
     def test_scope_mismatch_does_not_mutate_configuration(self):
         config = {}
         state(config).window("iocs", "created_at", NOW)

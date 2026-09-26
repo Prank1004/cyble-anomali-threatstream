@@ -166,63 +166,96 @@ def _sensitive_key(key: str) -> bool:
     return normalized in SENSITIVE_FIELD_NAMES or any(part in normalized for part in SENSITIVE_FIELD_PARTS)
 
 
-def _sanitize_alert_fields(value: Any, key: str = "", depth: int = 0, sensitive: bool = False) -> Any:
+def _sanitize_alert_fields(value: Any, key: str = "", depth: int = 0, sensitive: bool = False,
+                           *, analysis_only: bool = False) -> Any:
     """Keep the Cyble field structure while redacting sensitive values."""
     if depth > 32:
+        if analysis_only:
+            # The full source object has already passed its own depth check.
+            # JSON encoded inside a source string can expand more deeply only
+            # in this derivative; retain that exact string in the source body.
+            return "<omitted:analysis-depth>"
         raise ValueError("Cyble alert nesting exceeds the supported depth; no report was truncated and the checkpoint will not advance.")
     normalized_key = re.sub(r"[^a-z0-9]", "", key.lower())
     sensitive = sensitive or _sensitive_key(key)
     if isinstance(value, dict):
         result = {}
         for child_key, child in value.items():
-            safe_key = _redact_text(str(child_key))
+            # The full-content route uses this copy only for analysis. Keeping
+            # its keys avoids collisions between distinct sensitive source
+            # names; unknown keys are never emitted by the summary mapper.
+            safe_key = str(child_key) if analysis_only else _redact_text(str(child_key))
             if safe_key in result:
                 raise ValueError("Redacted Cyble field names collide; the record cannot be preserved safely.")
-            result[safe_key] = _sanitize_alert_fields(child, str(child_key), depth + 1, sensitive)
+            result[safe_key] = _sanitize_alert_fields(
+                child, str(child_key), depth + 1, sensitive, analysis_only=analysis_only)
         return result
     if isinstance(value, list):
-        return [_sanitize_alert_fields(child, key, depth + 1, sensitive) for child in value]
+        return [_sanitize_alert_fields(child, key, depth + 1, sensitive, analysis_only=analysis_only)
+                for child in value]
     if sensitive and value is not None:
         return "<redacted:sensitive-field>"
     if isinstance(value, str):
         if value.lstrip().startswith(("{", "[")):
             try:
                 parsed = json.loads(value)
-            except ValueError:
+            except (ValueError, RecursionError):
                 pass
             else:
                 if isinstance(parsed, (dict, list)):
-                    return _sanitize_alert_fields(parsed, key, depth + 1)
+                    return _sanitize_alert_fields(parsed, key, depth + 1, analysis_only=analysis_only)
         if normalized_key in UNSTRUCTURED_DATA_FIELD_NAMES:
             try:
                 parsed = json.loads(value)
-            except (ValueError, json.JSONDecodeError):
+            except (ValueError, RecursionError):
                 return "<omitted:unstructured-content>"
             if isinstance(parsed, (dict, list)):
-                return _sanitize_alert_fields(parsed, key, depth + 1)
+                return _sanitize_alert_fields(parsed, key, depth + 1, analysis_only=analysis_only)
             return "<omitted:unstructured-content>"
         if normalized_key in {"data", "payload", "datamessage"}:
             try:
                 parsed = json.loads(value)
-            except (ValueError, json.JSONDecodeError):
+            except (ValueError, RecursionError):
                 return "<omitted:unstructured-data-string>"
             if isinstance(parsed, (dict, list)):
-                return _sanitize_alert_fields(parsed, key, depth + 1)
+                return _sanitize_alert_fields(parsed, key, depth + 1, analysis_only=analysis_only)
             return "<omitted:unstructured-data-string>"
         return _redact_text(value)
     return value
 
 
-def _serialize_alert_fields(alert: dict[str, Any], max_bytes: int) -> str:
-    """Serialize every structured alert field; reject oversize records without truncating."""
-    safe_alert = _sanitize_alert_fields(alert)
-    serialized = json.dumps(safe_alert, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+def _validate_source_json(value: Any, depth: int = 0) -> None:
+    """Reject non-JSON inputs and excessive nesting without changing source values."""
+    if depth > 32:
+        raise ValueError("Cyble alert nesting exceeds the supported depth; no report was truncated and the checkpoint will not advance.")
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if not isinstance(key, str):
+                raise ValueError("Cyble source JSON must contain string field names.")
+            _validate_source_json(child, depth + 1)
+    elif isinstance(value, list):
+        for child in value:
+            _validate_source_json(child, depth + 1)
+    elif value is not None and not isinstance(value, (str, bool, int, float)):
+        raise ValueError("Cyble source contains a value unsupported by JSON.")
+
+
+def _serialize_alert_fields(alert: dict[str, Any], max_bytes: int, *, content_mode: str = "redacted") -> str:
+    """Serialize source JSON in the selected mode, rejecting oversize records."""
+    if content_mode not in {"full", "redacted"}:
+        raise ValueError("Cyble content mode must be 'full' or 'redacted'.")
+    if content_mode == "full":
+        _validate_source_json(alert)
+        payload = alert
+    else:
+        payload = _sanitize_alert_fields(alert)
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
     # Keep arbitrary Cyble strings from terminating the Markdown code fence. The
     # replacement remains valid JSON and decodes to the original backtick value.
     serialized = serialized.replace("`", r"\u0060")
     if len(serialized.encode("utf-8")) > max_bytes:
         raise ValueError(
-            "A sanitized Cyble alert exceeds CYBLE_MAX_REPORT_BYTES; no report was truncated and the checkpoint will not advance."
+            "A Cyble alert exceeds CYBLE_MAX_REPORT_BYTES; no report was truncated and the checkpoint will not advance."
         )
     return serialized
 
@@ -572,11 +605,20 @@ def _timestamp(alert: dict[str, Any], keys: Iterable[str]) -> str | None:
 
 def _map_alert(alert: dict[str, Any], service: str, Indicator: Any, Report: Any,
                threat_type: str, tlp: str, field_map: dict[str, Any],
-               max_report_bytes: int = DEFAULT_MAX_REPORT_BYTES) -> Any:
-    # Every output route, including custom IOC/context paths, receives the same
-    # sanitized representation. No side route can bypass field redaction.
-    alert = _sanitize_alert_fields(alert)
-    alert_id = _alert_identifier(alert)
+               max_report_bytes: int = DEFAULT_MAX_REPORT_BYTES,
+               content_mode: str = "redacted") -> Any:
+    if content_mode not in {"full", "redacted"}:
+        raise ValueError("Cyble content mode must be 'full' or 'redacted'.")
+    # Preserve the full original object only in the private bulletin's fenced
+    # source JSON. Native observables, summaries, tags, and custom mappings all
+    # receive a separate sanitized derivative in either mode.
+    serialized_alert = (_serialize_alert_fields(alert, max_report_bytes, content_mode="full")
+                        if content_mode == "full" else None)
+    # A legitimate numeric source ID can resemble a payment-card number. Its
+    # separately validated identity must remain stable in full-content mode.
+    source_id = _alert_identifier(alert) if content_mode == "full" else None
+    alert = _sanitize_alert_fields(alert, analysis_only=content_mode == "full")
+    alert_id = source_id or _alert_identifier(alert)
     actual_service = str(alert.get("service") or service)
     if actual_service != service or not re.fullmatch(r"[a-z0-9_\-]+", actual_service):
         raise ValueError("Cyble alert service does not match the requested service.")
@@ -632,12 +674,17 @@ def _map_alert(alert: dict[str, Any], service: str, Indicator: Any, Report: Any,
             context_json = json.dumps({key: value}, ensure_ascii=False).replace("`", r"\u0060")
             summary.append(f"- `{context_json}`")
     summary.append(f"Validated observables associated: {len(indicators)}")
-    summary.append(
-        "The complete structured Cyble alert is included below. Sensitive values are redacted; "
-        "unstructured content fields are omitted."
-    )
-    serialized_alert = _serialize_alert_fields(alert, max_report_bytes)
-    summary.extend(("", "Sanitized Cyble alert fields:", "```json", serialized_alert, "```"))
+    if content_mode == "full":
+        summary.append("The complete Cyble source alert is retained below, including sensitive values and raw content.")
+        source_label = "Complete Cyble source alert (private):"
+    else:
+        summary.append(
+            "The complete structured Cyble alert is included below. Sensitive values are redacted; "
+            "unstructured content fields are omitted."
+        )
+        source_label = "Sanitized Cyble alert fields:"
+        serialized_alert = _serialize_alert_fields(alert, max_report_bytes)
+    summary.extend(("", source_label, "```json", serialized_alert, "```"))
 
     return Report(
         name=f"Cyble Vision alert {alert_id}",

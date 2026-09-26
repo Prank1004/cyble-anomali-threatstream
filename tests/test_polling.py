@@ -1,6 +1,7 @@
 """Integrated polling state/failure tests with fake source and destination APIs."""
 import copy
 import hashlib
+import json
 import os
 import sys
 import tempfile
@@ -134,6 +135,43 @@ class PollingTests(unittest.TestCase):
         network_write.assert_not_called()
         self.assertEqual(self.snapshots, [])
         self.assertTrue(all(call.kwargs['take'] == 1 for call in self.client.fetch_page.call_args_list))
+
+    def test_full_content_is_default_private_and_never_written_to_logs(self):
+        os.environ['CYBLE_SERVICES'] = 'iocs'
+        alert = {'id': 'synthetic-full', 'service': 'iocs', 'password': 'SYNTHETIC_EXPOSED_PASSWORD',
+                 'content': 'unstructured source text', 'email': 'synthetic@example.invalid'}
+        self.client.fetch_page.return_value = [alert]
+        with self.assertLogs(runner.LOGGER, 'INFO') as logs:
+            runner.run_poll()
+        model = self.feed.calls[0][0]
+        payload = json.loads(model.description.split('```json\n', 1)[1].split('\n```', 1)[0])
+        self.assertEqual(payload, alert)
+        self.assertFalse(model.is_public)
+        self.assertNotIn('SYNTHETIC_EXPOSED_PASSWORD', '\n'.join(logs.output))
+        self.assertEqual(self.snapshots[-1]['cyble_content_mode'], 'full')
+
+    def test_mode_change_replays_lookback_once(self):
+        os.environ['CYBLE_SERVICES'] = 'iocs'
+        os.environ['CYBLE_CONTENT_MODE'] = 'redacted'
+        self.client.fetch_page.return_value = []
+        runner.run_poll()
+        self.client.fetch_page.reset_mock()
+        runner.run_poll()
+        self.client.fetch_page.assert_not_called()
+        os.environ['CYBLE_CONTENT_MODE'] = 'full'
+        runner.run_poll()
+        self.assertEqual(self.client.fetch_page.call_count, 1)
+        self.assertEqual(self.client.fetch_page.call_args.kwargs['start'], '2026-09-25T10:55:00.000000Z')
+        self.client.fetch_page.reset_mock()
+        runner.run_poll()
+        self.client.fetch_page.assert_not_called()
+
+    def test_full_mode_rejects_disabled_details_and_invalid_mode(self):
+        for config in ({'CYBLE_WITH_DATA_MESSAGE': 'false'}, {'CYBLE_CONTENT_MODE': 'unknown'}):
+            with self.subTest(config=config), patch.dict(os.environ, config), self.assertRaises(ValueError):
+                runner._settings()
+        with patch.dict(os.environ, {'CYBLE_WITH_DATA_MESSAGE': 'false', 'CYBLE_CONTENT_MODE': 'redacted'}):
+            self.assertFalse(runner._settings()['with_data'])
 
 
 class CheckpointHTTPTests(unittest.TestCase):

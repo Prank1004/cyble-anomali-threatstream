@@ -18,4 +18,6 @@ If a credential is exposed, revoke or rotate it through the issuing service and 
 
 ## Supported code
 
+The exact SDK 2.8.1 environment includes pinned Requests and Pillow versions with published advisories. Remote-image fetching is disabled, and no direct call to the affected Requests extraction utility was found in the connector or inspected SDK. These observations do not clear the dependency findings. Anomali's supported remediation and staging acceptance remain required; see [dependency review](docs/anomali-handoff.md#dependency-review).
+
 Security fixes target the latest maintained repository version. The Anomali Feed SDK has its own license, release lifecycle, and support channel. See [validation](docs/validation.md) for the runtime versions and checks actually exercised by this project.

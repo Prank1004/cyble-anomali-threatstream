@@ -12,13 +12,15 @@ Check both creation and update polling. Creation polling collects new alerts; up
 
 The feed configuration's `cyble_state_v1` namespace stores a source-scope hash, per-service creation/update cursors, and pending fixed windows. A service/date window advances only after all pages have completed, accepted report IDs have been checked, and the checkpoint write succeeds. Completed windows of other services retain their progress if a later window fails.
 
-`CYBLE_WINDOW_MINUTES` caps each window at 60 minutes by default. `CYBLE_SETTLE_SECONDS` holds its end 60 seconds behind the current time to reduce changes at the boundary. A page/time guard halves the pending window down to a minimum span of 60 seconds, allowing the next run to retry a smaller range without moving the incomplete cursor forward.
+`CYBLE_WINDOW_MINUTES` caps forward cursor progress at 60 minutes by default. The query also includes the overlap before the cursor, so the default total span is 65 minutes. `CYBLE_SETTLE_SECONDS` holds its end 60 seconds behind the current time to reduce changes at the boundary. A page/time guard halves the forward span down to a minimum of 60 seconds while retaining overlap, allowing the next run to retry a smaller range without moving the incomplete cursor forward.
 
 Cyble uses offset pagination; a fixed end time does not freeze the result set while alerts change. Settling and overlap reduce this risk but cannot guarantee a snapshot or zero omissions during concurrent updates. Reconcile a known historical interval during tenant acceptance. If the overlap alone exceeds the page budget, shrinking the forward window cannot resolve it; increase the page/runtime budget or adjust overlap after reviewing the affected interval.
 
 Overlap intentionally re-reads recent records. Stable Cyble alert identity supports replay through the SDK, but exactly-once delivery is not claimed. Network failures can occur after a request reaches ThreatStream and before confirmation. Native IOC CSV ingestion is asynchronous, and the hosted SDK cache can suppress refreshed attributes; accepted report IDs do not prove final indicator updates. Verify repeated reports, relationships, and refreshed fields in your tenant.
 
 A process lock helps prevent competing workers in the same execution environment. Configure singleton scheduling as well; a local lock alone cannot coordinate independent hosts or containers. Keep a feed owned by one active runner.
+
+Enforce a wall-clock process timeout in the runner. The connector's time budget is checked between pages and cannot preempt SDK retries or an active request. If the runner kills a stalled process, the operating system releases its local lock; the next run replays the saved pending window.
 
 Do not delete or move a cursor forward to clear an error. First resolve the API, mapping, size, or ingestion problem, then rerun. A manual forward jump can omit alerts. Historical replay should use a backed-up configuration and a documented time range, ideally in a separate feed.
 

@@ -3,8 +3,54 @@
 from __future__ import annotations
 
 import logging
+import sys
+from contextlib import contextmanager
 from importlib.metadata import PackageNotFoundError, version
+from threading import RLock
 from typing import Any
+
+
+SDK_UPLOAD_TIMEOUT = (5, 120)
+_SDK_TRANSPORT_LOCK = RLock()
+
+
+class _UploadRequestsProxy:
+    """Delegate requests attributes while bounding the SDK's direct CSV POST."""
+
+    def __init__(self, transport: Any) -> None:
+        self._transport = transport
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._transport, name)
+
+    def post(self, *args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = SDK_UPLOAD_TIMEOUT
+        return self._transport.post(*args, **kwargs)
+
+
+@contextmanager
+def _bounded_sdk_upload():
+    """Temporarily scope the SDK 2.8.1 upload workaround to its Feed module.
+
+    That version supplies timeouts to its HTTP helper but omits one on its
+    direct CSV requests.post call. Preserve its transport/exception contract;
+    never replace global requests functions or requests.Session. These are
+    connect/read inactivity limits, not an absolute ingestion deadline.
+    """
+    with _SDK_TRANSPORT_LOCK:
+        module = sys.modules.get("anomali_feedsdk.feed")
+        if module is None:
+            # Allows dependency-free adapter tests; a real Feed has already
+            # imported this module before reaching the ingestion boundary.
+            yield
+            return
+        original = module.requests
+        module.requests = _UploadRequestsProxy(original)
+        try:
+            yield
+        finally:
+            module.requests = original
 
 
 class SDKFailureCapture(logging.Handler):
@@ -109,7 +155,8 @@ def ingest_reports(feed: Any, reports: list[Any]) -> tuple[int, int]:
     capture = SDKFailureCapture()
     logger.addHandler(capture)
     try:
-        result = feed.ingest_reports(list(unique.values()))
+        with _bounded_sdk_upload():
+            result = feed.ingest_reports(list(unique.values()))
     except Exception:
         raise RuntimeError("Anomali report ingestion failed; its checkpoint was not advanced.") from None
     finally:

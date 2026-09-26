@@ -21,12 +21,13 @@
   <a href="docs/api-mapping.md">Field mapping</a> ·
   <a href="docs/operations.md">Operate</a> ·
   <a href="docs/validation.md">Validation</a> ·
+  <a href="docs/anomali-handoff.md">Anomali review</a> ·
   <a href="CONTRIBUTING.md">Contribute</a>
 </p>
 
 This connector polls **Cyble Vision Alerts API v2** and sends private alert bulletins and validated indicators to **Anomali ThreatStream**. Your feed runner schedules repeated polls for continuous ingestion. Cyble's JSON API is the source; a STIX/TAXII subscription is not required.
 
-> **Version 0.4.0 — integration preview.** Local and CI checks cover the implementation; they do not establish a live Cyble-to-ThreatStream delivery. Only `iocs` and `new_vulnerability` detail schemas have been inspected against live Cyble responses. See the [validation record](docs/validation.md) for the exact evidence and remaining tenant checks. This is an independent community project, with no Cyble or Anomali endorsement.
+> **Version 0.4.1 — integration preview for vendor review.** Local and CI checks cover the implementation; live ThreatStream acceptance remains pending. Only `iocs` and `new_vulnerability` detail schemas have been inspected against live Cyble responses. The SDK pins dependencies with published advisories; see the [Anomali handoff](docs/anomali-handoff.md) for vendor decisions and the [validation record](docs/validation.md) for measured coverage. This is an independent community project, with no Cyble or Anomali endorsement.
 
 ## What it does
 

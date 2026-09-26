@@ -15,7 +15,7 @@ import logging
 import os
 from pathlib import Path
 import sys
-from tempfile import TemporaryDirectory
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
 
@@ -30,7 +30,7 @@ if SDK_AVAILABLE:
         from anomali_feedsdk.models import Indicator, Report
         from anomali_feedsdk.feed import Feed
         from cyble_anomali_feed import _map_alert, _new_feed
-        from cyble_sdk import construct_sdk, sdk_models
+        from cyble_sdk import SDK_UPLOAD_TIMEOUT, construct_sdk, ingest_reports, sdk_models
 
 
 def synthetic_alert():
@@ -136,6 +136,58 @@ class AnomaliSDKContractTests(unittest.TestCase):
             feed = _new_feed()
         self.assert_feed_contract(feed, transport, logging_config, root_state)
         self.assertIs(feed.feed_config["tm_body_skip_fetching_images"], True)
+
+    def upload_boundary(self):
+        transport, _ = self.feed_boundary()
+        feed = construct_sdk(Feed, username="synthetic-user", api_key="synthetic-placeholder",
+                             api_url="https://example.invalid", feed_id="123", feed_name="synthetic",
+                             classification="private", requests_verify_ssl=True, allow_update=False,
+                             trustedcircles=None, workgroups=None, http_proxy=None, https_proxy=None)
+        feed.feed_config["tm_body_skip_fetching_images"] = True
+        feed.throttling_enabled = False
+        feed.throttle_max_minute_ingestions = False
+        feed.threat_model_throttling_sleep_time = 0
+        feed.tm_batch_upload_interval_ms = 0
+        lookup = Mock(status_code=200, content=b"{}", reason="OK", url="https://example.invalid/v1/tipreport/")
+        lookup.json.return_value = {"objects": []}
+        created = Mock(status_code=201, content=b"{}", reason="Created", url="https://example.invalid/v1/tipreport/")
+        created.json.return_value = {"id": 77}
+        transport.side_effect = [lookup, created]
+        report = self.map_alert({"id": "synthetic-upload", "service": "iocs", "data": {"domain": "example.com"}})
+        return feed, report
+
+    def test_real_sdk_csv_upload_receives_finite_timeout_and_preserves_sdk_module(self):
+        import requests
+        import anomali_feedsdk.feed as feed_module
+        original_requests = feed_module.requests
+        feed, report = self.upload_boundary()
+        accepted = Mock(status_code=201, content=b"{}", reason="Created", url="https://example.invalid/v1/csvfile/")
+        accepted.json.return_value = {}
+        with TemporaryDirectory() as directory, \
+                patch("anomali_feedsdk.feed.NamedTemporaryFile", side_effect=lambda **kwargs: NamedTemporaryFile(dir=directory, **kwargs)), \
+                patch.object(requests, "post", return_value=accepted) as upload:
+            self.assertEqual(ingest_reports(feed, [report]), (1, 1))
+        upload.assert_called_once()
+        self.assertEqual(upload.call_args.kwargs["timeout"], SDK_UPLOAD_TIMEOUT)
+        self.assertIs(upload.call_args.kwargs["verify"], True)
+        self.assertIs(feed_module.requests, original_requests)
+        self.assertEqual(feed.processed_threat_models[report.report_id], 77)
+
+    def test_real_sdk_csv_timeout_rejects_batch_despite_accepted_report_id(self):
+        import requests
+        import anomali_feedsdk.feed as feed_module
+        original_requests = feed_module.requests
+        feed, report = self.upload_boundary()
+        with TemporaryDirectory() as directory, \
+                patch("anomali_feedsdk.feed.NamedTemporaryFile", side_effect=lambda **kwargs: NamedTemporaryFile(dir=directory, **kwargs)), \
+                patch.object(requests, "post", side_effect=requests.ReadTimeout("SYNTHETIC_PRIVATE_VALUE")) as upload:
+            with self.assertRaises(RuntimeError) as raised:
+                ingest_reports(feed, [report])
+        self.assertNotIn("SYNTHETIC_PRIVATE_VALUE", str(raised.exception))
+        self.assertIn("checkpoint was not advanced", str(raised.exception))
+        self.assertEqual(upload.call_args.kwargs["timeout"], SDK_UPLOAD_TIMEOUT)
+        self.assertEqual(feed.processed_threat_models[report.report_id], 77)
+        self.assertIs(feed_module.requests, original_requests)
 
     def test_sdk_adapter_does_not_parse_cli_or_reconfigure_logging(self):
         with TemporaryDirectory() as directory:

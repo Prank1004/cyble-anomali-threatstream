@@ -20,7 +20,7 @@ from cyble_mapping import DEFAULT_MAX_REPORT_BYTES, VALID_TLP, _alert_identifier
 from cyble_sdk import construct_sdk, ingest_reports as _ingest_reports, quiet_sdk_logger, require_sdk, sdk_models
 from cyble_state import CheckpointState, poll_lock
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 LOGGER = logging.getLogger("cyble_anomali_feed")
 
 

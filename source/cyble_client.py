@@ -36,6 +36,34 @@ def _looks_like_alert(value: dict[str, Any]) -> bool:
     )
 
 
+def _is_alert_record(value: dict[str, Any], services: list[str]) -> bool:
+    """Do not mistake an envelope's request ID for a nested alert's identity."""
+    if not _looks_like_alert(value):
+        return False
+    # Actual alerts can contain arbitrary structured data. A service and source
+    # timestamp distinguish those records from ID-bearing response wrappers.
+    if value.get("service") in services and any(key in value for key in ("created_at", "createdAt")):
+        return True
+
+    def has_container(node: Any, depth: int = 0) -> bool:
+        if isinstance(node, list):
+            return True
+        if not isinstance(node, dict):
+            return False
+        if depth > 8:
+            raise CybleAPIError("Cyble Alerts API envelope nesting exceeds the supported limit.")
+        if depth and _looks_like_alert(node):
+            return True
+        if any(key in node for key in (*ALERT_CONTAINERS, *services)):
+            return True
+        return "data" in node and has_container(node["data"], depth + 1)
+
+    has_nested_records = has_container(value)
+    if has_nested_records and value.get("service") in services:
+        raise CybleAPIError("Cyble Alerts API returned an ambiguous record/envelope identity.")
+    return not has_nested_records
+
+
 def _check_envelope(value: dict[str, Any]) -> None:
     """Reject application errors and partial pages without exposing body values."""
     if value.get("success") is False or value.get("error") or value.get("errors"):
@@ -50,13 +78,13 @@ def _extract_alert_rows(payload: dict[str, Any], services: list[str]) -> list[di
         if depth > 8:
             raise CybleAPIError("Cyble Alerts API envelope nesting exceeds the supported limit.")
         if isinstance(value, list):
-            if all(isinstance(item, dict) and _looks_like_alert(item) for item in value):
+            if all(isinstance(item, dict) and _is_alert_record(item, services) for item in value):
                 return value
             raise CybleAPIError("Cyble Alerts API returned malformed alert records.")
         if not isinstance(value, dict):
             raise CybleAPIError("Cyble Alerts API returned an unsupported alert container.")
         _check_envelope(value)
-        if _looks_like_alert(value):
+        if _is_alert_record(value, services):
             return [value]
         buckets = [service for service in dict.fromkeys(services) if service in value]
         containers = [key for key in ("data", *ALERT_CONTAINERS) if key in value]
@@ -77,26 +105,40 @@ def _extract_alert_rows(payload: dict[str, Any], services: list[str]) -> list[di
     return visit(payload)
 
 
-def _check_page_metadata(payload: dict[str, Any], skip: int, take: int, count: int) -> None:
+def _check_page_metadata(payload: dict[str, Any], skip: int, take: int, count: int,
+                         services: list[str]) -> None:
     """Do not let a short, explicitly incomplete page finish a polling window."""
     if count > take:
         raise CybleAPIError("Cyble Alerts API returned more rows than the requested page size.")
 
-    def visit(value: Any, depth: int = 0) -> None:
-        if not isinstance(value, dict) or depth > 8 or _looks_like_alert(value):
+    def visit(value: Any, local_count: int, depth: int = 0, metadata_only: bool = False) -> None:
+        if not isinstance(value, dict) or depth > 8 or (not metadata_only and _is_alert_record(value, services)):
             return
         _check_envelope(value)
         for key in ("total", "total_count", "totalCount", "total_records", "totalRecords"):
-            total = value.get(key)
-            if isinstance(total, int) and not isinstance(total, bool):
-                if total < skip + count or (count < take and total > skip + count):
-                    raise CybleAPIError("Cyble Alerts API pagination metadata is inconsistent; the checkpoint must not advance.")
-        if count < take and any(value.get(key) is True for key in ("has_more", "hasMore", "hasNextPage", "next")):
-            raise CybleAPIError("Cyble Alerts API returned a short page with more data; the checkpoint must not advance.")
+            if key not in value:
+                continue
+            total = value[key]
+            if type(total) is not int or total < 0:
+                raise CybleAPIError("Cyble Alerts API returned malformed pagination counts; the checkpoint must not advance.")
+            if total < skip + local_count or (local_count < take and total > skip + local_count):
+                raise CybleAPIError("Cyble Alerts API pagination metadata is inconsistent; the checkpoint must not advance.")
+        for key in ("has_more", "hasMore", "hasNextPage", "next"):
+            if key not in value:
+                continue
+            if not isinstance(value[key], bool):
+                raise CybleAPIError("Cyble Alerts API returned malformed pagination flags; the checkpoint must not advance.")
+            if local_count < take and value[key]:
+                raise CybleAPIError("Cyble Alerts API returned a short page with more data; the checkpoint must not advance.")
         for key in ("data", "meta", "pagination", *ALERT_CONTAINERS):
-            visit(value.get(key), depth + 1)
+            visit(value.get(key), local_count, depth + 1, key in {"meta", "pagination"})
+        for service in dict.fromkeys(services):
+            if service in value:
+                bucket = value[service]
+                bucket_count = len(_extract_alert_rows({service: bucket}, [service]))
+                visit(bucket, bucket_count, depth + 1)
 
-    visit(payload)
+    visit(payload, count)
 
 
 def _check_service_completeness(payload: dict[str, Any], count: int) -> None:
@@ -144,7 +186,7 @@ class CybleClient:
             "Accept": "application/json",
             "Content-Type": "application/json",
             "Referer": "https://cyble.ai/",
-            "User-Agent": "cyble-anomali-threatstream-feed/0.4.0",
+            "User-Agent": "cyble-anomali-threatstream-feed/0.4.1",
         }
         retryable = {429, 500, 502, 503, 504}
         url = API_ROOT + path
@@ -273,5 +315,5 @@ class CybleClient:
                 raise CybleAPIError("Cyble Alerts API returned an unexpected service.")
             if service in (None, "") and len(set(services)) != 1:
                 raise CybleAPIError("Cyble Alerts API returned a record without an unambiguous service.")
-        _check_page_metadata(payload, skip, take, len(rows))
+        _check_page_metadata(payload, skip, take, len(rows), services)
         return rows

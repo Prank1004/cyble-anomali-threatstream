@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.1 — 2026-09-26
+
+- Final QA: enforce nested service-bucket pagination metadata and reject ambiguous ID-bearing response wrappers.
+- Redact quoted credential assignments embedded in text while preserving valid hash values containing card-like digit sequences.
+- Bound the SDK CSV upload's connect/read wait through a scoped adapter and add actual SDK transport regression checks.
+- Document cooperative run limits, the required external process timeout, and POSIX runtime support.
+- Add the Anomali engineering handoff, including open vendor dependency advisories and staging acceptance decisions.
+
 ## 0.4.0 — 2026-09-25
 
 ### Ingestion reliability

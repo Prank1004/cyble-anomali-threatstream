@@ -59,14 +59,16 @@ EMAIL_RE = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
 SECRET_RE = re.compile(r"(?i)(?:password|passwd|secret|api[_ -]?key|access[_ -]?token)\s*[:=]")
 SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(password|passwd|secret|api[_ -]?key|access[_ -]?token|refresh[_ -]?token|token|authorization|cookie)\b"
-    r"\s*(?::|=|\bis\b)\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;&]+)"
+    r"[\"']?\s*(?::|=|\bis\b)\s*(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s,;&]+)"
 )
 AUTH_VALUE_RE = re.compile(r"(?i)\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+")
 PRIVATE_KEY_RE = re.compile(r"-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----", re.S)
 URL_USERINFO_RE = re.compile(r"(?i)(https?://)[^/\s@]+@")
 URL_TEXT_RE = re.compile(r"https?://[^\s<>\"']+", re.I)
 SSN_RE = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
-CARD_CANDIDATE_RE = re.compile(r"(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)")
+# A digit run inside a hexadecimal hash is not a payment-card value. Keep
+# standalone candidates bounded by non-alphanumeric characters.
+CARD_CANDIDATE_RE = re.compile(r"(?<![A-Za-z0-9])(?:\d[ -]?){12,18}\d(?![A-Za-z0-9])")
 SENSITIVE_FIELD_PARTS = {
     "password", "passwd", "secret", "credential", "authorization", "accesstoken", "refreshtoken",
     "apikey", "privatekey", "cookie", "socialsecurity", "creditcard", "cardnumber", "paymentcard",

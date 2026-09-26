@@ -51,6 +51,7 @@ class AlertEnvelopeTests(unittest.TestCase):
             ({"data": {"iocs": [{"id": "synthetic", "service": "github"}]}}, ["iocs"]),
             ({"data": [{"status": "success", "message": "metadata only"}]}, ["iocs"]),
             ({"data": [{"id": "synthetic"}, "malformed-row"]}, ["iocs"]),
+            ({"id": "synthetic", "service": "iocs", "data": {"items": [{"id": "nested"}]}}, ["iocs"]),
         ):
             with self.subTest(payload=payload), self.assertRaises(CybleAPIError):
                 _extract_alert_rows(payload, services)
@@ -58,6 +59,19 @@ class AlertEnvelopeTests(unittest.TestCase):
     def test_accepts_nested_common_envelope(self):
         payload = {"success": True, "data": {"results": {"rows": [{"id": "synthetic"}]}}}
         self.assertEqual(_extract_alert_rows(payload, ["iocs"]), [{"id": "synthetic"}])
+
+    def test_wrapper_id_does_not_replace_nested_alert_records(self):
+        record = {"id": "synthetic-alert", "service": "iocs", "data": {"ioc": "example.invalid"}}
+        for nested in (record, [record], {"items": [record]}, {"iocs": {"items": [record]}}):
+            with self.subTest(nested=nested):
+                rows = _extract_alert_rows({"id": "synthetic-request", "data": nested}, ["iocs"])
+                self.assertEqual(rows, [record])
+        self.assertEqual(_extract_alert_rows({"id": "synthetic-request", "data": []}, ["iocs"]), [])
+
+    def test_real_alert_preserves_structured_data_and_its_own_id(self):
+        record = {"id": "synthetic-alert", "service": "iocs", "created_at": "2026-01-01T00:00:00Z",
+                  "data": {"items": [{"id": "nested-source-id", "total": 100}]}}
+        self.assertEqual(_extract_alert_rows({"data": [record]}, ["iocs"]), [record])
 
     def test_rejects_errors_and_partial_responses(self):
         for extra in ({"success": False}, {"error": "synthetic"}, {"errors": ["synthetic"]},
@@ -92,12 +106,54 @@ class CybleClientTests(unittest.TestCase):
         self.assertNotIn("countOnly", kwargs["json"])
         self.assertTrue(kwargs["verify"])
         self.assertFalse(kwargs["allow_redirects"])
-        self.assertTrue(kwargs["headers"]["User-Agent"].endswith("/0.4.0"))
+        self.assertTrue(kwargs["headers"]["User-Agent"].endswith("/0.4.1"))
 
     def test_rejects_short_page_that_claims_more_data(self):
         for metadata in ({"total": 3}, {"hasMore": True}, {"next": True}, {"partial": True}):
             with self.subTest(metadata=metadata), self.assertRaises(CybleAPIError):
                 self.fetch({"data": [{"id": "synthetic"}], "meta": metadata})
+
+    def test_rejects_incomplete_metadata_inside_service_buckets(self):
+        for metadata in ({"total": 100}, {"hasMore": True}, {"pagination": {"total": 100}}):
+            for request_id in ({}, {"id": "synthetic-request"}):
+                payload = {**request_id, "data": {"iocs": {"items": [{"id": "synthetic"}], **metadata}}}
+                with self.subTest(payload=payload), self.assertRaises(CybleAPIError):
+                    self.fetch(payload)
+
+    def test_rejects_malformed_recognized_pagination_metadata(self):
+        cases = [(key, bad) for key in ('total', 'total_count', 'totalCount', 'total_records', 'totalRecords')
+                 for bad in ('100', '', None, True, 1.0, -1, [], {})]
+        cases += [(key, bad) for key in ('has_more', 'hasMore', 'hasNextPage', 'next')
+                  for bad in ('true', 'false', None, 1, 0, [], {})]
+        for key, bad in cases:
+            for records in ([], [{'id': 'synthetic'}]):
+                for payload in (
+                    {'data': records, 'meta': {key: bad}},
+                    {'data': records, 'pagination': {'id': 'synthetic-request', key: bad}},
+                    {'data': {'iocs': {'items': records, key: bad}}},
+                ):
+                    with self.subTest(key=key, bad=bad, payload=payload), self.assertRaises(CybleAPIError):
+                        self.fetch(payload)
+
+    def test_accepts_well_typed_empty_final_pagination_metadata(self):
+        payload = {'data': {'iocs': {'items': [], 'total': 0, 'has_more': False, 'next': False}}}
+        self.assertEqual(self.fetch(payload), [])
+
+    def test_service_bucket_metadata_uses_each_buckets_record_count(self):
+        payload = {"data": {
+            "iocs": {"items": [{"id": "synthetic-one"}], "total": 1},
+            "github": {"items": [{"id": "synthetic-two"}], "total": 1},
+        }}
+        self.assertEqual(len(self.fetch(payload, services=["iocs", "github"])), 2)
+        payload["data"]["iocs"]["total"] = 100
+        with self.assertRaises(CybleAPIError):
+            self.fetch(payload, services=["iocs", "github"])
+
+    def test_final_service_page_and_actual_alert_metadata_are_preserved(self):
+        record = {"id": "synthetic", "service": "iocs", "created_at": "2026-01-01T00:00:00Z",
+                  "data": {"items": [{"total": 100}]}}
+        payload = {"data": {"iocs": {"items": [record], "meta": {"total": 3}}}}
+        self.assertEqual(self.fetch(payload, skip=2), [record])
 
     def test_rejects_more_rows_than_requested_and_inconsistent_totals(self):
         for payload in (

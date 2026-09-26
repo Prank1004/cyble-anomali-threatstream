@@ -6,13 +6,15 @@ This connector runs as a scheduled Anomali Feed SDK process. Each invocation pol
 
 | Requirement | What to provision |
 |---|---|
-| Runtime | Python 3.10 or 3.11 and the vendor-provided `anomali_feedsdk` 2.8.1 wheel |
+| Runtime | POSIX host (Linux or macOS), Python 3.10 or 3.11, and the vendor-provided `anomali_feedsdk` 2.8.1 wheel |
 | Cyble | Alerts API v2 access, API token, company UUID, and the required alert service subscriptions |
 | ThreatStream | A provisioned private feed, API endpoint, feed ID/name, and API account with report/observable ingestion and feed-configuration update permissions |
 | Network | Verified outbound HTTPS to `bifrost.cyble.ai` and your ThreatStream API endpoint |
-| Scheduling | One active feed process at a time, with a working directory and absolute executable path |
+| Scheduling | One active feed process at a time, with a working directory, absolute executable path, and an external process timeout |
 
 The proprietary SDK wheel and Cyble API guide are not part of this repository. Obtain them through the vendors. Keep tenant data and SDK internals outside your checkout.
+
+Before production, resolve the SDK dependency advisory review with Anomali; see the [handoff](anomali-handoff.md#dependency-review). The supplied wheel pins Requests and Pillow versions with published advisories. Installing newer versions over those exact pins creates an unsupported dependency combination and does not complete vendor acceptance.
 
 ## Install
 
@@ -50,7 +52,7 @@ Inject credentials from the feed runtime's secret store. The entry point reads e
 | `CYBLE_INITIAL_LOOKBACK_HOURS` | `24` | Initial history when a service has no saved cursor |
 | `CYBLE_PAGE_SIZE` | `200` | Page size; maximum 200 with detailed payloads, 2,000 without |
 | `CYBLE_MAX_PAGES_PER_SERVICE` | `100` | Page guard for each service/date window |
-| `CYBLE_WINDOW_MINUTES` | `60` | Maximum poll-window span, from 1 to 1,440 minutes |
+| `CYBLE_WINDOW_MINUTES` | `60` | Maximum forward cursor step, from 1 to 1,440 minutes; queried span also includes overlap |
 | `CYBLE_OVERLAP_SECONDS` | `300` | Replays boundary records; must be smaller than the configured window |
 | `CYBLE_SETTLE_SECONDS` | `60` | Keeps polling end behind current time for stability; 0 to 3,600 seconds |
 | `CYBLE_SYNC_UPDATED_ALERTS` | `true` | Polls `updated_at` to ingest changes to existing alerts |
@@ -58,7 +60,7 @@ Inject credentials from the feed runtime's secret store. The entry point reads e
 | `CYBLE_THREAT_TYPE` | `malware` | ThreatStream Indicator classification; review its meaning for your services |
 | `CYBLE_TLP` | `amber` | Report and Indicator marking: `amber`, `green`, `red`, or `white` |
 | `CYBLE_FIELD_MAP_PATH` | Bundled example | Custom mapping file with defaults and per-service overrides |
-| `CYBLE_MAX_RUN_MINUTES` | `20` | Maximum connector run budget |
+| `CYBLE_MAX_RUN_MINUTES` | `20` | Cooperative run budget, checked between pages; does not interrupt an active SDK call |
 | `CYBLE_MAX_REPORT_BYTES` | `4194304` | Maximum sanitized alert JSON size; excess fails the window without truncating |
 | `CYBLE_LOCK_DIR` | Private user temp directory | Optional private directory for the POSIX process lock |
 | `TS_BATCH_SIZE` | `1000` | Feed SDK batch size |
@@ -78,7 +80,11 @@ Use the Anomali feed runner's supported deployment and scheduling process for yo
 
 Choose a cadence that fits your API quota and normal processing time; five minutes is an example, not an API guarantee. Arrange exactly one active runner for each feed across all hosts. The POSIX lock coordinates processes on one host only. Treat nonzero exit status as an operational failure and surface it in your runner's monitoring.
 
+Configure the runner to terminate a process that exceeds its wall-clock limit, including a bounded grace period before forced termination. `CYBLE_MAX_RUN_MINUTES` is a cooperative budget: SDK retries, sleeps, and in-flight requests may run beyond it. The adapter supplies a 5-second connect timeout and 120-second read timeout to the SDK's CSV upload, but HTTP timeouts are not total process deadlines. An interrupted window is replayed from its saved state on the next run. Confirm this lifecycle in Anomali's supported runner.
+
 Do not copy a credential-bearing command into scheduler arguments. Inject credentials as secrets. Feed visibility is private; access and downstream distribution still follow your ThreatStream tenant policies.
+
+Give the runner a private temporary directory (`TMPDIR`, owned by its service account with mode `0700`) and a cleanup policy after terminated runs. The SDK writes temporary IOC CSV files and may leave them behind after an upload exception. Keep this directory outside the repository, preserve files needed by active runs, and confirm the hosted runner's equivalent with Anomali.
 
 ## Tenant acceptance
 

@@ -6,10 +6,10 @@ import unittest
 from functools import wraps
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'source'))
-from cyble_sdk import construct_sdk, ingest_reports, quiet_sdk_logger
+from cyble_sdk import SDK_UPLOAD_TIMEOUT, _UploadRequestsProxy, construct_sdk, ingest_reports, quiet_sdk_logger
 
 
 def item(report_id='synthetic-report'):
@@ -17,6 +17,43 @@ def item(report_id='synthetic-report'):
 
 
 class AdapterTests(unittest.TestCase):
+    def test_upload_proxy_adds_finite_timeout_and_preserves_transport_contract(self):
+        transport = SimpleNamespace(post=Mock(return_value="accepted"), ConnectionError=ConnectionError)
+        proxy = _UploadRequestsProxy(transport)
+        self.assertIs(proxy.ConnectionError, ConnectionError)
+        self.assertEqual(proxy.post("https://example.invalid/csvfile/", verify=True), "accepted")
+        self.assertEqual(transport.post.call_args.kwargs, {"verify": True, "timeout": SDK_UPLOAD_TIMEOUT})
+        proxy.post("https://example.invalid/csvfile/", timeout=None)
+        self.assertEqual(transport.post.call_args.kwargs["timeout"], SDK_UPLOAD_TIMEOUT)
+        proxy.post("https://example.invalid/csvfile/", timeout=(2, 30))
+        self.assertEqual(transport.post.call_args.kwargs["timeout"], (2, 30))
+
+    def test_upload_scope_restores_sdk_reference_after_success_and_failure(self):
+        import requests
+        global_post = requests.post
+        global_request = requests.sessions.Session.request
+        for fail in (False, True):
+            transport = SimpleNamespace(post=Mock(return_value=None))
+            module = SimpleNamespace(requests=transport)
+            def upload(reports):
+                self.assertIsNot(module.requests, transport)
+                self.assertIs(requests.post, global_post)
+                self.assertIs(requests.sessions.Session.request, global_request)
+                module.requests.post("https://example.invalid/csvfile/")
+                if fail:
+                    raise ValueError("SYNTHETIC_PRIVATE_VALUE")
+                return 1, 1
+            feed = SimpleNamespace(ingest_reports=upload, processed_threat_models={"synthetic-report": 5})
+            with self.subTest(fail=fail), patch.dict(sys.modules, {"anomali_feedsdk.feed": module}):
+                if fail:
+                    with self.assertRaises(RuntimeError) as raised:
+                        ingest_reports(feed, [item()])
+                    self.assertNotIn("SYNTHETIC_PRIVATE_VALUE", str(raised.exception))
+                else:
+                    self.assertEqual(ingest_reports(feed, [item()]), (1, 1))
+                self.assertIs(module.requests, transport)
+                self.assertEqual(transport.post.call_args.kwargs["timeout"], SDK_UPLOAD_TIMEOUT)
+
     def test_constructor_bypasses_cli_logging_decorator_only(self):
         def decorator(function):
             @wraps(function)

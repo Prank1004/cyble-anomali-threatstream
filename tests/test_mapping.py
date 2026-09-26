@@ -71,6 +71,34 @@ class MappingTests(unittest.TestCase):
         self.assertNotIn('SYNTHETIC_', json.dumps(safe))
         self.assertIsInstance(safe['other'], dict)
 
+    def test_quoted_secret_assignments_in_prose_are_redacted(self):
+        secret = 'SYNTHETIC_PRIVATE_VALUE'
+        for text in ('Result: {"password":"' + secret + '"}',
+                     "Result: {'api_key': '" + secret + "'}",
+                     'Result: {"access_token": "' + secret + ' with spaces"}',
+                     'Result: {"secret": "' + secret + '\\" escaped quote"}'):
+            with self.subTest(text=text):
+                safe = _sanitize_alert_fields({'description': text})
+                self.assertNotIn(secret, safe['description'])
+                self.assertNotIn('escaped quote', safe['description'])
+                self.assertIn('<redacted>', safe['description'])
+
+    def test_hash_digit_runs_are_preserved_as_native_indicators(self):
+        for size in (32, 40, 64, 128):
+            digest = 'a4111111111111111b' + 'a' * (size - 18)
+            with self.subTest(size=size):
+                result = mapped({'id': 'synthetic-1', 'service': 'iocs', 'hash': digest})
+                self.assertEqual(body(result)['hash'], digest)
+                self.assertEqual([item.value for item in result.related_indicators], [digest])
+
+    def test_sensitive_hash_values_and_standalone_cards_remain_redacted(self):
+        digest = 'a4111111111111111b' + 'a' * 46
+        safe = _sanitize_alert_fields({'api_key': digest, 'credentials': {'hash': digest},
+                                      'description': 'Payment card 4111111111111111 and 4111-1111-1111-1111.'})
+        self.assertNotIn(digest, json.dumps(safe))
+        self.assertNotIn('4111', safe['description'])
+        self.assertEqual(safe['description'].count('<redacted-payment-card>'), 2)
+
     def test_full_mapping_escapes_markdown_fences_without_losing_values(self):
         alert = {'id': 'synthetic-1', 'service': 'iocs', 'label': '```json\nhello```'}
         result = mapped(alert)

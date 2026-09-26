@@ -46,6 +46,8 @@ The client handles a single record, a record list inside a supported envelope, a
 
 An unrecognized schema is an error, not an empty result. The incomplete window's checkpoint must not advance. The parsing flexibility is implementation coverage; it is not a claim that every envelope has been observed from Cyble.
 
+Recognized pagination totals must be nonnegative JSON integers, and continuation flags must be JSON booleans. Nulls, strings, and other malformed values fail explicitly, including within service buckets and metadata wrappers. Wrapper request IDs must not replace the identities of nested alert records.
+
 ## Field destinations
 
 | Cyble field/content | ThreatStream mapping |

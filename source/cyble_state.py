@@ -21,6 +21,9 @@ from typing import Any, Iterator
 
 STATE_KEY = "cyble_state_v1"
 DATE_FIELDS = {"created_at", "updated_at"}
+# created_at_reconcile re-reads settled creation windows after a delay so
+# alerts that became searchable late are still collected.
+STREAM_FIELDS = DATE_FIELDS | {"created_at_reconcile"}
 UTC = timezone.utc
 
 
@@ -94,7 +97,7 @@ class CheckpointState:
             raise ValueError("Cyble checkpoint streams must be an object.")
         for service, fields in state["streams"].items():
             _validate_service(service)
-            if not isinstance(fields, dict) or any(field not in DATE_FIELDS for field in fields):
+            if not isinstance(fields, dict) or any(field not in STREAM_FIELDS for field in fields):
                 raise ValueError("Cyble checkpoint contains an invalid date-field stream.")
             for stream in fields.values():
                 if not isinstance(stream, dict) or set(stream) - {"cursor", "pending"}:
@@ -115,8 +118,8 @@ class CheckpointState:
 
     def _stream(self, service: str, date_field: str) -> dict[str, Any]:
         _validate_service(service)
-        if date_field not in DATE_FIELDS:
-            raise ValueError("Cyble checkpoint date field must be created_at or updated_at.")
+        if date_field not in STREAM_FIELDS:
+            raise ValueError("Cyble checkpoint stream must be created_at, updated_at, or created_at_reconcile.")
         fields = self._state["streams"].setdefault(service, {})
         return fields.setdefault(date_field, {"cursor": _iso(self._initial_start)})
 
@@ -126,6 +129,11 @@ class CheckpointState:
         if value > datetime.now(UTC):
             raise ValueError("Cyble checkpoint cursor is in the future.")
         return value
+
+    def pending_end(self, service: str, date_field: str) -> datetime | None:
+        """Return the end of the saved unfinished window, if there is one."""
+        pending = self._stream(service, date_field).get("pending")
+        return None if pending is None else _parse_timestamp(pending["end"])
 
     def window(self, service: str, date_field: str, now: datetime) -> tuple[str, str] | None:
         """Create a bounded pending window or replay its exact saved bounds."""

@@ -10,6 +10,7 @@ import requests
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "source"))
 
 from cyble_client import CybleAPIError, CybleClient, _extract_alert_rows
+from cyble_version import VERSION
 
 
 def response(payload, status=200, headers=None):
@@ -106,7 +107,7 @@ class CybleClientTests(unittest.TestCase):
         self.assertNotIn("countOnly", kwargs["json"])
         self.assertTrue(kwargs["verify"])
         self.assertFalse(kwargs["allow_redirects"])
-        self.assertTrue(kwargs["headers"]["User-Agent"].endswith("/0.5.0"))
+        self.assertTrue(kwargs["headers"]["User-Agent"].endswith("/" + VERSION))
 
     def test_single_service_payload_preserves_missing_empty_and_null_service_fields(self):
         for fields in ({}, {"service": ""}, {"service": None}, {"service": "iocs"}):
@@ -114,63 +115,44 @@ class CybleClientTests(unittest.TestCase):
             with self.subTest(fields=fields):
                 self.assertEqual(self.fetch({"data": {"iocs": [original]}}), [original])
 
-    def test_rejects_short_page_that_claims_more_data(self):
-        for metadata in ({"total": 3}, {"hasMore": True}, {"next": True}, {"partial": True}):
-            with self.subTest(metadata=metadata), self.assertRaises(CybleAPIError):
-                self.fetch({"data": [{"id": "synthetic"}], "meta": metadata})
+    def test_pagination_counts_and_continuation_fields_are_advisory(self):
+        # Their semantics are undocumented; the runner pages until no new rows
+        # arrive, so none of these shapes may stop ingestion.
+        record = {"id": "synthetic"}
+        for metadata in ({"total": 3}, {"total": "1"}, {"total": None}, {"total": 5000, "hasMore": True},
+                         {"next": None}, {"next": "https://example.invalid/page/2"}, {"next": True},
+                         {"hasMore": "false"}, {"has_more": 1}, {"totalCount": -1}):
+            for payload in ({"data": [record], "meta": metadata}, {"data": [record], **metadata},
+                            {"data": {"iocs": {"items": [record], **metadata}}},
+                            {"data": [record], "pagination": {"id": "synthetic-request", **metadata}}):
+                with self.subTest(payload=payload):
+                    self.assertEqual(self.fetch(payload), [record])
 
-    def test_rejects_incomplete_metadata_inside_service_buckets(self):
-        for metadata in ({"total": 100}, {"hasMore": True}, {"pagination": {"total": 100}}):
-            for request_id in ({}, {"id": "synthetic-request"}):
-                payload = {**request_id, "data": {"iocs": {"items": [{"id": "synthetic"}], **metadata}}}
+    def test_explicit_partial_or_error_flags_still_fail(self):
+        for flags in ({"partial": True}, {"truncated": True}, {"isPartial": True}, {"success": False},
+                      {"error": "synthetic"}):
+            for payload in ({"data": [{"id": "synthetic"}], "meta": flags},
+                            {"data": [{"id": "synthetic"}], "pagination": flags},
+                            {"data": {"iocs": {"items": [{"id": "synthetic"}], **flags}}}):
                 with self.subTest(payload=payload), self.assertRaises(CybleAPIError):
                     self.fetch(payload)
 
-    def test_rejects_malformed_recognized_pagination_metadata(self):
-        cases = [(key, bad) for key in ('total', 'total_count', 'totalCount', 'total_records', 'totalRecords')
-                 for bad in ('100', '', None, True, 1.0, -1, [], {})]
-        cases += [(key, bad) for key in ('has_more', 'hasMore', 'hasNextPage', 'next')
-                  for bad in ('true', 'false', None, 1, 0, [], {})]
-        for key, bad in cases:
-            for records in ([], [{'id': 'synthetic'}]):
-                for payload in (
-                    {'data': records, 'meta': {key: bad}},
-                    {'data': records, 'pagination': {'id': 'synthetic-request', key: bad}},
-                    {'data': {'iocs': {'items': records, key: bad}}},
-                ):
-                    with self.subTest(key=key, bad=bad, payload=payload), self.assertRaises(CybleAPIError):
-                        self.fetch(payload)
-
-    def test_accepts_well_typed_empty_final_pagination_metadata(self):
-        payload = {'data': {'iocs': {'items': [], 'total': 0, 'has_more': False, 'next': False}}}
-        self.assertEqual(self.fetch(payload), [])
-
-    def test_service_bucket_metadata_uses_each_buckets_record_count(self):
+    def test_service_buckets_with_metadata_return_every_bucket(self):
         payload = {"data": {
-            "iocs": {"items": [{"id": "synthetic-one"}], "total": 1},
+            "iocs": {"items": [{"id": "synthetic-one"}], "total": 100},
             "github": {"items": [{"id": "synthetic-two"}], "total": 1},
         }}
         self.assertEqual(len(self.fetch(payload, services=["iocs", "github"])), 2)
-        payload["data"]["iocs"]["total"] = 100
-        with self.assertRaises(CybleAPIError):
-            self.fetch(payload, services=["iocs", "github"])
 
     def test_final_service_page_and_actual_alert_metadata_are_preserved(self):
         record = {"id": "synthetic", "service": "iocs", "created_at": "2026-01-01T00:00:00Z",
-                  "data": {"items": [{"total": 100}]}}
+                  "data": {"items": [{"total": 100}], "partial": True}}
         payload = {"data": {"iocs": {"items": [record], "meta": {"total": 3}}}}
         self.assertEqual(self.fetch(payload, skip=2), [record])
 
-    def test_rejects_more_rows_than_requested_and_inconsistent_totals(self):
-        for payload in (
-            {"data": [{"id": "one"}, {"id": "two"}, {"id": "three"}]},
-            {"data": [{"id": "one"}], "pagination": {"total": 0}},
-        ):
-            with self.subTest(payload=payload), self.assertRaises(CybleAPIError):
-                self.fetch(payload)
-
-    def test_accepts_final_short_page_with_consistent_metadata(self):
-        self.assertEqual(len(self.fetch({"data": [{"id": "synthetic"}], "meta": {"total": 3}}, skip=2)), 1)
+    def test_rejects_more_rows_than_requested(self):
+        with self.assertRaises(CybleAPIError):
+            self.fetch({"data": [{"id": "one"}, {"id": "two"}, {"id": "three"}]})
 
     def test_rejects_cross_service_rows_and_unattributed_multiservice_records(self):
         with self.assertRaises(CybleAPIError):

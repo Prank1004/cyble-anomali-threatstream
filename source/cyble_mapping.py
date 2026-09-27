@@ -12,6 +12,10 @@ from typing import Any, Iterable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 DEFAULT_MAX_REPORT_BYTES = 4 * 1024 * 1024
+# Source JSON deeper than this cannot be a real alert; it is quarantined.
+MAX_SOURCE_DEPTH = 256
+# Derived analysis and redacted bodies stop descending here and use a marker.
+MAX_SANITIZE_DEPTH = 32
 SAFE_CONTEXT_KEYS = {
     "risk_score",
     "risk_rating",
@@ -169,13 +173,10 @@ def _sensitive_key(key: str) -> bool:
 def _sanitize_alert_fields(value: Any, key: str = "", depth: int = 0, sensitive: bool = False,
                            *, analysis_only: bool = False) -> Any:
     """Keep the Cyble field structure while redacting sensitive values."""
-    if depth > 32:
-        if analysis_only:
-            # The full source object has already passed its own depth check.
-            # JSON encoded inside a source string can expand more deeply only
-            # in this derivative; retain that exact string in the source body.
-            return "<omitted:analysis-depth>"
-        raise ValueError("Cyble alert nesting exceeds the supported depth; no report was truncated and the checkpoint will not advance.")
+    if depth > MAX_SANITIZE_DEPTH:
+        # In full mode the exact source is retained in the body, so only this
+        # derivative is cut short. In redacted mode omission is the safe choice.
+        return "<omitted:analysis-depth>" if analysis_only else "<omitted:nesting-depth>"
     normalized_key = re.sub(r"[^a-z0-9]", "", key.lower())
     sensitive = sensitive or _sensitive_key(key)
     if isinstance(value, dict):
@@ -225,9 +226,9 @@ def _sanitize_alert_fields(value: Any, key: str = "", depth: int = 0, sensitive:
 
 
 def _validate_source_json(value: Any, depth: int = 0) -> None:
-    """Reject non-JSON inputs and excessive nesting without changing source values."""
-    if depth > 32:
-        raise ValueError("Cyble alert nesting exceeds the supported depth; no report was truncated and the checkpoint will not advance.")
+    """Reject non-JSON inputs and pathological nesting without changing source values."""
+    if depth > MAX_SOURCE_DEPTH:
+        raise ValueError("Cyble alert nesting exceeds the supported depth.")
     if isinstance(value, dict):
         for key, child in value.items():
             if not isinstance(key, str):
@@ -240,8 +241,8 @@ def _validate_source_json(value: Any, depth: int = 0) -> None:
         raise ValueError("Cyble source contains a value unsupported by JSON.")
 
 
-def _serialize_alert_fields(alert: dict[str, Any], max_bytes: int, *, content_mode: str = "redacted") -> str:
-    """Serialize source JSON in the selected mode, rejecting oversize records."""
+def _serialize_alert_fields(alert: dict[str, Any], *, content_mode: str = "redacted") -> str:
+    """Serialize source JSON in the selected mode."""
     if content_mode not in {"full", "redacted"}:
         raise ValueError("Cyble content mode must be 'full' or 'redacted'.")
     if content_mode == "full":
@@ -252,12 +253,19 @@ def _serialize_alert_fields(alert: dict[str, Any], max_bytes: int, *, content_mo
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
     # Keep arbitrary Cyble strings from terminating the Markdown code fence. The
     # replacement remains valid JSON and decodes to the original backtick value.
-    serialized = serialized.replace("`", r"\u0060")
-    if len(serialized.encode("utf-8")) > max_bytes:
-        raise ValueError(
-            "A Cyble alert exceeds CYBLE_MAX_REPORT_BYTES; no report was truncated and the checkpoint will not advance."
-        )
-    return serialized
+    return serialized.replace("`", r"\u0060")
+
+
+def _fit_source_body(serialized: str, max_bytes: int) -> tuple[str, int | None]:
+    """Return the body, cut on a UTF-8 boundary, and its original size if cut.
+
+    One oversized alert must not stall its whole service stream, so the
+    bulletin is still created and explicitly marked as shortened.
+    """
+    encoded = serialized.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return serialized, None
+    return encoded[:max_bytes].decode("utf-8", "ignore"), len(encoded)
 
 
 def _alert_identifier(alert: dict[str, Any]) -> str:
@@ -324,8 +332,12 @@ def _is_acceptable_candidate(value: Any, type_hint: str | None) -> str | None:
 def _walk_semantic_iocs(node: Any, Indicator: Any, threat_type: str, severity: str | None,
                         source_created: str | None, source_modified: str | None,
                         tags: list[str], explicit_candidates: list[tuple[Any, str | None]] | None = None,
-                        tlp: str = "amber") -> list[Any]:
-    """Extract only values under IOC-shaped keys; never scrape arbitrary prose."""
+                        tlp: str = "amber", scan_generic: bool = True) -> list[Any]:
+    """Extract only values under IOC-shaped keys; never scrape arbitrary prose.
+
+    With scan_generic False only the explicit field-map candidates are used, so
+    victim assets in exposure/leak alerts are not labelled as malicious.
+    """
     candidates = []
 
     def visit(value: Any, key_context: str | None = None, inherited_type: str | None = None,
@@ -370,7 +382,8 @@ def _walk_semantic_iocs(node: Any, Indicator: Any, threat_type: str, severity: s
                 return
             visit(decoded, key_context, inherited_type, first_seen, last_seen, depth + 1, timestamp_rank)
 
-    visit(node)
+    if scan_generic:
+        visit(node)
     candidates.extend((value, hint, source_created, source_modified, 0) for value, hint in (explicit_candidates or []))
     output: list[Any] = []
     seen: set[str] = set()
@@ -383,15 +396,19 @@ def _walk_semantic_iocs(node: Any, Indicator: Any, threat_type: str, severity: s
         if key in seen:
             continue
         seen.add(key)
-        indicator = Indicator(
-            value=candidate,
-            threat_type=threat_type,
-            severity=severity,
-            source_created=first_seen,
-            source_modified=last_seen,
-            tags=tags,
-            tlp=tlp,
-        )
+        try:
+            indicator = Indicator(
+                value=candidate,
+                threat_type=threat_type,
+                severity=severity,
+                source_created=first_seen,
+                source_modified=last_seen,
+                tags=tags,
+                tlp=tlp,
+            )
+        except (RuntimeError, ValueError, TypeError):
+            # One value the SDK cannot model must not cost the whole bulletin.
+            continue
         if getattr(indicator, "observable", None) is not None and getattr(indicator, "itype", None):
             output.append(indicator)
     return output
@@ -427,9 +444,10 @@ def _json_path_entries(root: Any, tokens: list[tuple[str, int]]) -> list[tuple[t
         for _ in range(expansions):
             expanded = []
             for indices, value in selected:
-                if not isinstance(value, list):
-                    raise ValueError("A Cyble field-map [*] wildcard encountered a non-array value.")
-                expanded.extend((indices + (index,), item) for index, item in enumerate(value))
+                # A wildcard over a non-array does not match this alert's shape.
+                # Never treat a scalar as a one-item array, and never fail the alert.
+                if isinstance(value, list):
+                    expanded.extend((indices + (index,), item) for index, item in enumerate(value))
             selected = expanded
         current = selected
     return current
@@ -440,11 +458,14 @@ def _json_path_values(root: Any, path: str) -> list[Any]:
     return [value for _, value in _json_path_entries(root, _json_path_tokens(path))]
 
 
-def _explicit_ioc_candidates(alert: dict[str, Any], service: str, field_map: dict[str, Any]) -> list[tuple[Any, str | None]]:
+def _explicit_ioc_candidates(alert: dict[str, Any], service: str, field_map: dict[str, Any],
+                             include_defaults: bool = True) -> list[tuple[Any, str | None]]:
+    """Apply field-map IOC rules; default rules are skipped for non-IOC services."""
     defaults = field_map.get("default", {}) if isinstance(field_map.get("default", {}), dict) else {}
     services = field_map.get("services", {}) if isinstance(field_map.get("services", {}), dict) else {}
     override = services.get(service, {}) if isinstance(services.get(service, {}), dict) else {}
-    default_rules, service_rules = defaults.get("ioc_rules", []), override.get("ioc_rules", [])
+    default_rules = defaults.get("ioc_rules", []) if include_defaults else []
+    service_rules = override.get("ioc_rules", [])
     if not isinstance(default_rules, list) or not isinstance(service_rules, list):
         raise ValueError("Cyble field-map IOC rules must be JSON arrays.")
     rules = default_rules + service_rules
@@ -606,19 +627,27 @@ def _timestamp(alert: dict[str, Any], keys: Iterable[str]) -> str | None:
 def _map_alert(alert: dict[str, Any], service: str, Indicator: Any, Report: Any,
                threat_type: str, tlp: str, field_map: dict[str, Any],
                max_report_bytes: int = DEFAULT_MAX_REPORT_BYTES,
-               content_mode: str = "redacted") -> Any:
+               content_mode: str = "redacted", generic_iocs: bool = True) -> Any:
+    """Build one private bulletin. Raises ValueError only for unusable alerts
+    (no stable ID, non-JSON values, wrong service); the runner quarantines those.
+
+    generic_iocs False limits native Indicators to service-specific field-map
+    rules, so leak/exposure services do not label the victim's own assets.
+    """
     if content_mode not in {"full", "redacted"}:
         raise ValueError("Cyble content mode must be 'full' or 'redacted'.")
     # Preserve the full original object only in the private bulletin's fenced
     # source JSON. Native observables, summaries, tags, and custom mappings all
     # receive a separate sanitized derivative in either mode.
-    serialized_alert = (_serialize_alert_fields(alert, max_report_bytes, content_mode="full")
+    serialized_alert = (_serialize_alert_fields(alert, content_mode="full")
                         if content_mode == "full" else None)
-    # A legitimate numeric source ID can resemble a payment-card number. Its
-    # separately validated identity must remain stable in full-content mode.
-    source_id = _alert_identifier(alert) if content_mode == "full" else None
+    # The validated source ID is the stable report identity in both modes; a
+    # numeric ID resembling a payment card must not be redacted into a new one.
+    alert_id = _alert_identifier(alert)
     alert = _sanitize_alert_fields(alert, analysis_only=content_mode == "full")
-    alert_id = source_id or _alert_identifier(alert)
+    if serialized_alert is None:
+        serialized_alert = _serialize_alert_fields(alert)
+    source_body, original_size = _fit_source_body(serialized_alert, max_report_bytes)
     actual_service = str(alert.get("service") or service)
     if actual_service != service or not re.fullmatch(r"[a-z0-9_\-]+", actual_service):
         raise ValueError("Cyble alert service does not match the requested service.")
@@ -652,8 +681,9 @@ def _map_alert(alert: dict[str, Any], service: str, Indicator: Any, Report: Any,
         source_created=source_created,
         source_modified=source_modified,
         tags=tags,
-        explicit_candidates=_explicit_ioc_candidates(alert, service, field_map),
+        explicit_candidates=_explicit_ioc_candidates(alert, service, field_map, include_defaults=generic_iocs),
         tlp=tlp,
+        scan_generic=generic_iocs,
     ) if status != "FALSE_POSITIVE" else []
     context = _safe_context(alert, service, field_map)
     summary = [
@@ -674,6 +704,9 @@ def _map_alert(alert: dict[str, Any], service: str, Indicator: Any, Report: Any,
             context_json = json.dumps({key: value}, ensure_ascii=False).replace("`", r"\u0060")
             summary.append(f"- `{context_json}`")
     summary.append(f"Validated observables associated: {len(indicators)}")
+    if not generic_iocs:
+        summary.append("Generic IOC detection is off for this service; only service-specific field-map rules "
+                       "create native Indicators. All values remain in the source JSON below.")
     if content_mode == "full":
         summary.append("The complete Cyble source alert is retained below, including sensitive values and raw content.")
         source_label = "Complete Cyble source alert (private):"
@@ -683,15 +716,21 @@ def _map_alert(alert: dict[str, Any], service: str, Indicator: Any, Report: Any,
             "unstructured content fields are omitted."
         )
         source_label = "Sanitized Cyble alert fields:"
-        serialized_alert = _serialize_alert_fields(alert, max_report_bytes)
-    summary.extend(("", source_label, "```json", serialized_alert, "```"))
+    report_tags = list(tags)
+    if original_size is not None:
+        report_tags.append("cyble_source_truncated")
+        summary.append(
+            f"The source JSON below is shortened to the first {max_report_bytes} of {original_size} bytes "
+            "(CYBLE_MAX_REPORT_BYTES) and is not valid JSON. Retrieve the complete record from Cyble by its alert ID."
+        )
+    summary.extend(("", source_label, "```json", source_body, "```"))
 
     return Report(
         name=f"Cyble Vision alert {alert_id}",
         threat_model_type="tipreport",
         related_indicators=indicators,
         description="\n".join(summary),
-        tags=tags,
+        tags=report_tags,
         is_public=False,
         original_source="Cyble Vision",
         original_source_id=alert_id,

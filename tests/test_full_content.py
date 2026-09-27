@@ -143,11 +143,15 @@ class FullContentTests(unittest.TestCase):
             with self.subTest(mode=mode), self.assertRaises(ValueError):
                 _map_alert(alert, "iocs", indicator, report, "malware", "amber", {}, content_mode=mode)
 
-    def test_oversize_and_excessive_nesting_fail_without_truncation(self):
-        with self.assertRaises(ValueError):
-            mapped({"id": "synthetic-full-1", "service": "iocs", "password": "x" * 2048}, max_report_bytes=1024)
+    def test_oversize_is_marked_and_deep_source_is_preserved(self):
+        result = mapped({"id": "synthetic-full-1", "service": "iocs", "password": "x" * 2048}, max_report_bytes=1024)
+        self.assertIn("cyble_source_truncated", result.tags)
         nested = {"end": True}
-        for _ in range(35):
+        for _ in range(100):
+            nested = {"next": nested}
+        alert = {"id": "synthetic-full-1", "service": "iocs", "data": nested}
+        self.assertEqual(source_body(mapped(alert)), alert)
+        for _ in range(200):
             nested = {"next": nested}
         with self.assertRaises(ValueError):
             mapped({"id": "synthetic-full-1", "service": "iocs", "data": nested})

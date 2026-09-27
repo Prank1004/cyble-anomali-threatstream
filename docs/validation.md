@@ -2,11 +2,11 @@
 
 ## Release scope
 
-Version **0.5.0** is an integration preview, reviewed on **2026-09-26**. Implementation checks and an offline contract run against the supplied Anomali Feed SDK establish the behavior described below. A live ThreatStream tenant, ingestion credentials, and running schedule were not available for end-to-end acceptance. The [Anomali handoff](anomali-handoff.md) records open vendor decisions, including dependency advisories.
+Version **0.6.0** is an integration preview, reviewed on **2026-09-27**. Implementation checks and an offline contract run against the supplied Anomali Feed SDK establish the behavior described below. A live ThreatStream tenant, ingestion credentials, and running schedule were not available for end-to-end acceptance. The [Anomali handoff](anomali-handoff.md) records open vendor decisions, including dependency advisories.
 
 The current public result is available in [GitHub Actions](https://github.com/Prank1004/cyble-anomali-threatstream/actions/workflows/ci.yml). Public CI runs on Python 3.10 and 3.11 and skips the licensed SDK contract checks. The private local validation environment uses Python 3.11.15 and the exact vendor-provided `anomali_feedsdk` **2.8.1** wheel.
 
-The local release check passed **118 tests**, including **13 real-SDK contracts**, with no skips. Compilation, CLI help/version, Git whitespace checks, and installed dependency compatibility also passed. Public CI can run the remaining **105 tests** without distributing the proprietary SDK. Dependency advisory findings remain open and are recorded in the handoff.
+For 0.6.0, **122 offline tests** passed on Python 3.10 and 3.11, along with compilation, CLI help/version, and Git whitespace checks. The **13 real-SDK contracts were not re-run** for this version because the licensed wheel was not available in the environment where the changes were made. They last passed for 0.5.0, whose release check ran 118 tests with no skips. Re-run them with the licensed SDK before staging. 0.6.0 does not change the SDK adapter; `Feed` now receives `allow_update` from `TS_ALLOW_UPDATE`, which defaults to the previously validated `False`. Dependency advisory findings remain open and are recorded in the handoff.
 
 ## What was exercised
 
@@ -23,6 +23,11 @@ The local release check passed **118 tests**, including **13 real-SDK contracts*
 | SDK CSV transport | Actual SDK upload uses finite connect/read timeouts; a simulated read timeout rejects the batch even after the report ID was accepted |
 | Destination acceptance guard | Mocked report acceptance, cached reports, missing accepted IDs, malformed results, and SDK warnings/errors |
 | Continuous polling | Independent service streams, creation/update windows, failure recovery, repeated pages, page limits, checkpoint write errors, and local process locking |
+| Paging completeness | Overlapping offsets keep rows that shift up between requests; a shift beyond the overlap defers and replays the window; a server-side page cap does not end a window early; pagination counts and flags cannot fail a poll |
+| Late alerts | The delayed re-read stream covers settled history in whole windows |
+| Resilience | Unusable alerts are quarantined without source content while the stream advances; widespread SDK rejection fails the window instead; oversized alerts become marked, shortened bulletins; one unmodellable Indicator does not drop its bulletin |
+| Indicator scope | Non-indicator services keep every value in the bulletin but create Indicators only from per-service rules |
+| Daemon | Cycles, graceful stop with the window left pending, failed-cycle backoff, per-service backoff visible in the status heartbeat, and unchanged alerts sent only once |
 | Content-mode migration | Bounded lookback replay on mode change, older unfinished work retained, no repeated replay when mode is unchanged |
 | Source preview | Dry-run remains read-only with respect to ThreatStream and checkpoints |
 
@@ -58,9 +63,11 @@ Use the [deployment acceptance steps](deployment.md#tenant-acceptance) before pr
 - Confirm repeated ingestion, updated source fields, relationships, and SDK cache behavior.
 - Exercise the alert services covered by your subscription, especially schemas not sampled above.
 - Confirm the destination accepts your largest full-content reports and applies the intended access controls to sensitive source data.
-- Verify failure/restart recovery and several scheduled cycles with one active runner per feed.
+- Verify failure/restart recovery and several `--daemon` or scheduled cycles with one active runner per feed.
+- Measure end-to-end latency and the Cyble request rate at the chosen poll interval against your quota.
+- Confirm what `TS_ALLOW_UPDATE` changes, and that a Cyble status change updates the existing bulletin.
 - Obtain Anomali's approved remediation for the SDK's pinned dependency advisories; dependency compatibility does not establish security clearance.
 
 In default full mode, arbitrary Cyble fields, source credentials, personal data, and raw text are retained in private bulletin JSON under their original keys and types. They are not all native ThreatStream attributes. Native Indicator extraction and summary context use a sanitized derivative. Optional redacted mode applies the previous value redaction and raw-content omission policy. Pattern-based sanitization does not prove that arbitrary source content contains no personal data.
 
-Cyble offset pagination can change during a poll. Fixed windows, settling, overlap, and replay reduce the risk, but exactly-once delivery and zero-loss snapshots are not established. SDK report acceptance also does not prove final asynchronous IOC processing. See [operations](operations.md) for recovery and these limits.
+Cyble offset pagination can change during a poll. Overlapping pages detect shifts up to the overlap and replay beyond it; fixed windows, settling, window overlap, and the delayed re-read reduce the remaining risk. Exactly-once delivery and zero-loss snapshots are still not established. SDK report acceptance also does not prove final asynchronous IOC processing. See [operations](operations.md) for recovery and these limits.

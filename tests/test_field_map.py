@@ -97,13 +97,20 @@ class FieldMapTests(unittest.TestCase):
             with self.subTest(value_path=value_path, type_path=type_path), self.assertRaises(ValueError):
                 candidates({}, {"value_path": value_path, "type_path": type_path})
 
-    def test_wildcards_require_arrays_instead_of_treating_scalars_as_singletons(self):
-        with self.assertRaises(ValueError):
-            candidates({"observables": {"value": "example.invalid"}}, {"value_path": "observables[*].value"})
-        with self.assertRaises(ValueError):
-            candidates({"observables": [{"values": ["example.invalid"], "types": "domain"}]}, {
-                "value_path": "observables[*].values[*]", "type_path": "observables[*].types[*]",
-            })
+    def test_wildcards_over_non_arrays_select_nothing_instead_of_failing_the_alert(self):
+        self.assertEqual(candidates({"observables": {"value": "example.invalid"}},
+                                    {"value_path": "observables[*].value"}), [])
+        # A scalar type is not treated as a one-item array of types.
+        self.assertEqual(candidates({"observables": [{"values": ["example.invalid"], "types": "domain"}]}, {
+            "value_path": "observables[*].values[*]", "type_path": "observables[*].types[*]",
+        }), [("example.invalid", None)])
+
+    def test_default_rules_are_skipped_for_non_indicator_services(self):
+        field_map = {"default": {"ioc_rules": [{"value_path": "ioc"}]},
+                     "services": {"iocs": {"ioc_rules": [{"value_path": "c2", "type": "domain"}]}}}
+        alert = {"ioc": "default.invalid", "c2": "service.invalid"}
+        self.assertEqual(_explicit_ioc_candidates(alert, "iocs", field_map, include_defaults=False),
+                         [("service.invalid", "domain")])
 
 
 if __name__ == "__main__":

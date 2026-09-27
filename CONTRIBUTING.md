@@ -1,6 +1,6 @@
 # Contributing
 
-Contributions should preserve scheduled, read-only Cyble polling, private ThreatStream ingestion, replay-safe progress, and accurate documentation of coverage.
+Contributions should preserve continuous and scheduled read-only Cyble polling, private ThreatStream ingestion, replay-safe progress, and accurate documentation of coverage.
 
 ## Work on a change
 
@@ -28,6 +28,6 @@ Include positive and negative synthetic cases. Verify original keys, types, valu
 
 ## Review expectations
 
-Keep changes focused, preserve existing configuration where practical, and document migrations. Never weaken TLS, log raw payloads, advance a failed checkpoint, or claim successful tenant ingestion from an offline test. Logo changes must use authentic vendor assets, preserve their appearance, and update [source attribution](assets/README.md).
+Keep changes focused, preserve existing configuration where practical, and document migrations. Never weaken TLS, log raw payloads, advance a failed checkpoint, advance past an alert without either a bulletin or a quarantine record, or claim successful tenant ingestion from an offline test. Logo changes must use authentic vendor assets, preserve their appearance, and update [source attribution](assets/README.md).
 
 This project is community maintained. Vendor-specific account, licensing, quota, or platform issues should also be raised through the appropriate vendor support channel.

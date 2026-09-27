@@ -9,6 +9,8 @@ from typing import Any
 
 import requests
 
+from cyble_version import VERSION
+
 
 API_ROOT = "https://bifrost.cyble.ai/ar-apollo-v2/api/v2/y"
 ALERTS_PATH = "/alerts"
@@ -105,40 +107,20 @@ def _extract_alert_rows(payload: dict[str, Any], services: list[str], *, preserv
     return visit(payload)
 
 
-def _check_page_metadata(payload: dict[str, Any], skip: int, take: int, count: int,
-                         services: list[str]) -> None:
-    """Do not let a short, explicitly incomplete page finish a polling window."""
-    if count > take:
-        raise CybleAPIError("Cyble Alerts API returned more rows than the requested page size.")
+def _check_metadata_flags(payload: Any, services: list[str], depth: int = 0) -> None:
+    """Reject explicit error/partial flags in metadata wrappers.
 
-    def visit(value: Any, local_count: int, depth: int = 0, metadata_only: bool = False) -> None:
-        if not isinstance(value, dict) or depth > 8 or (not metadata_only and _is_alert_record(value, services)):
-            return
-        _check_envelope(value)
-        for key in ("total", "total_count", "totalCount", "total_records", "totalRecords"):
-            if key not in value:
-                continue
-            total = value[key]
-            if type(total) is not int or total < 0:
-                raise CybleAPIError("Cyble Alerts API returned malformed pagination counts; the checkpoint must not advance.")
-            if total < skip + local_count or (local_count < take and total > skip + local_count):
-                raise CybleAPIError("Cyble Alerts API pagination metadata is inconsistent; the checkpoint must not advance.")
-        for key in ("has_more", "hasMore", "hasNextPage", "next"):
-            if key not in value:
-                continue
-            if not isinstance(value[key], bool):
-                raise CybleAPIError("Cyble Alerts API returned malformed pagination flags; the checkpoint must not advance.")
-            if local_count < take and value[key]:
-                raise CybleAPIError("Cyble Alerts API returned a short page with more data; the checkpoint must not advance.")
-        for key in ("data", "meta", "pagination", *ALERT_CONTAINERS):
-            visit(value.get(key), local_count, depth + 1, key in {"meta", "pagination"})
-        for service in dict.fromkeys(services):
-            if service in value:
-                bucket = value[service]
-                bucket_count = len(_extract_alert_rows({service: bucket}, [service]))
-                visit(bucket, bucket_count, depth + 1)
-
-    visit(payload, count)
+    Pagination counts and continuation fields (total, next, hasMore) are not
+    used: their meaning is undocumented, and the runner pages until the source
+    returns no new rows instead of trusting them.
+    """
+    if not isinstance(payload, dict) or depth > 8 or _is_alert_record(payload, services):
+        return
+    for key in ("meta", "pagination"):
+        if isinstance(payload.get(key), dict):
+            _check_envelope(payload[key])
+    for key in ("data", *ALERT_CONTAINERS, *services):
+        _check_metadata_flags(payload.get(key), services, depth + 1)
 
 
 def _check_service_completeness(payload: dict[str, Any], count: int) -> None:
@@ -186,7 +168,7 @@ class CybleClient:
             "Accept": "application/json",
             "Content-Type": "application/json",
             "Referer": "https://cyble.ai/",
-            "User-Agent": "cyble-anomali-threatstream-feed/0.5.0",
+            "User-Agent": f"cyble-anomali-threatstream-feed/{VERSION}",
         }
         retryable = {429, 500, 502, 503, 504}
         url = API_ROOT + path
@@ -311,11 +293,13 @@ class CybleClient:
         # The runner requests one service per page and supplies that context to
         # the mapper. Do not insert/overwrite a source field in its full payload.
         rows = _extract_alert_rows(payload, services, preserve_fields=len(set(services)) == 1)
+        if len(rows) > take:
+            raise CybleAPIError("Cyble Alerts API returned more rows than the requested page size.")
         for row in rows:
             service = row.get("service")
             if service not in (None, "") and service not in services:
                 raise CybleAPIError("Cyble Alerts API returned an unexpected service.")
             if service in (None, "") and len(set(services)) != 1:
                 raise CybleAPIError("Cyble Alerts API returned a record without an unambiguous service.")
-        _check_page_metadata(payload, skip, take, len(rows), services)
+        _check_metadata_flags(payload, services)
         return rows

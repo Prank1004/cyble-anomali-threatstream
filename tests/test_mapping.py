@@ -146,14 +146,45 @@ class MappingTests(unittest.TestCase):
             with self.subTest(alert=alert), self.assertRaises(ValueError):
                 mapped(alert)
 
-    def test_oversize_and_excessive_nesting_fail_without_truncation(self):
-        with self.assertRaises(ValueError):
-            _serialize_alert_fields({'label': 'x' * 1100}, 1024)
+    def test_oversize_alert_still_becomes_a_marked_bulletin(self):
+        alert = {'id': 'synthetic-1', 'service': 'iocs', 'ioc': 'example.invalid', 'label': 'é' * 2000}
+        result = mapped(alert, max_report_bytes=1024)
+        self.assertIn('cyble_source_truncated', result.tags)
+        self.assertIn('shortened to the first 1024 of', result.description)
+        fenced = result.description.split('```json\n', 1)[1].split('\n```', 1)[0]
+        self.assertLessEqual(len(fenced.encode('utf-8')), 1024)
+        self.assertEqual([item.value for item in result.related_indicators], ['example.invalid'])
+        self.assertNotIn('cyble_source_truncated', result.related_indicators[0].tags)
+        self.assertEqual(_serialize_alert_fields({'label': 'x' * 1100}), '{"label":"' + 'x' * 1100 + '"}')
+
+    def test_redacted_mode_omits_excessive_nesting_instead_of_failing(self):
         nested = {'end': True}
         for _ in range(35):
             nested = {'next': nested}
-        with self.assertRaises(ValueError):
-            _sanitize_alert_fields(nested)
+        self.assertIn('<omitted:nesting-depth>', json.dumps(_sanitize_alert_fields(nested)))
+        self.assertEqual(mapped({'id': 'synthetic-1', 'service': 'iocs', 'data': nested}).original_source_id,
+                         'synthetic-1')
+
+    def test_non_indicator_services_keep_values_but_create_no_generic_indicators(self):
+        alert = {'id': 'synthetic-1', 'service': 'leaks', 'data': {
+            'url': 'https://portal.example.invalid/login', 'domain': 'example.invalid', 'ip': '8.8.8.8',
+            'ioc': 'generic.example.invalid', 'confirmed_c2': 'c2.example.invalid'}}
+        field_map = {'default': {'ioc_rules': [{'value_path': 'data.ioc', 'type': 'domain'}]},
+                     'services': {'leaks': {'ioc_rules': [{'value_path': 'data.confirmed_c2', 'type': 'domain'}]}}}
+        result = _map_alert(alert, 'leaks', indicator, report, 'malware', 'amber', field_map,
+                            content_mode='full', generic_iocs=False)
+        self.assertEqual([item.value for item in result.related_indicators], ['c2.example.invalid'])
+        self.assertEqual(body(result), alert)
+        self.assertIn('Generic IOC detection is off', result.description)
+
+    def test_one_unmodellable_indicator_does_not_drop_the_bulletin(self):
+        def picky(**kwargs):
+            if kwargs['value'] == '9.9.9.9':
+                raise RuntimeError('synthetic SDK rejection')
+            return indicator(**kwargs)
+        result = _map_alert({'id': 'synthetic-1', 'service': 'iocs', 'ips': ['9.9.9.9', '1.1.1.1']},
+                            'iocs', picky, report, 'malware', 'amber', {})
+        self.assertEqual([item.value for item in result.related_indicators], ['1.1.1.1'])
 
     def test_explicit_missing_or_malformed_field_map_is_not_ignored(self):
         with tempfile.TemporaryDirectory() as directory:

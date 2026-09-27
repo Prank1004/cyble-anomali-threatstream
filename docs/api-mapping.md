@@ -13,7 +13,7 @@ Generic source-field preservation applies to each configured service. `CYBLE_SER
 | Purpose | Method and path | Behavior |
 |---|---|---|
 | Discover services | `GET /ar-apollo-v2/api/v2/y/services` | `--list-services` and `CYBLE_SERVICES=all` discovery |
-| Search alerts | `POST /ar-apollo-v2/api/v2/y/alerts` | One service per request; fixed time window and offset pagination |
+| Search alerts | `POST /ar-apollo-v2/api/v2/y/alerts` | One service per request; fixed time window and overlapping offset pagination |
 
 The API root is `https://bifrost.cyble.ai`. The token is sent in the Bearer authorization header, and `companyUuid` scopes each search. TLS is verified and redirects are disabled. The client includes JSON headers and the Cyble portal Referer.
 
@@ -42,11 +42,11 @@ No alert-status exclusion is sent. False-positive records remain available to up
 
 ## Accepted response envelopes
 
-The client handles a single record, a record list inside a supported envelope, and service-keyed buckets such as `data.iocs[]`. Recognized envelope names include `data`, `alerts`, `items`, `results`, `records`, and `rows`. It verifies record shape and service consistency, and rejects application errors, ambiguous containers, malformed rows, and explicitly incomplete or inconsistent pagination metadata.
+The client handles a single record, a record list inside a supported envelope, and service-keyed buckets such as `data.iocs[]`. Recognized envelope names include `data`, `alerts`, `items`, `results`, `records`, and `rows`. It verifies record shape and service consistency, and rejects application errors, ambiguous containers, malformed rows, explicit `partial`/`truncated` flags, and pages larger than requested.
 
 An unrecognized schema is an error, not an empty result. The incomplete window's checkpoint must not advance. The parsing flexibility is implementation coverage; it is not a claim that every envelope has been observed from Cyble.
 
-Recognized pagination totals must be nonnegative JSON integers, and continuation flags must be JSON booleans. Nulls, strings, and other malformed values fail explicitly, including within service buckets and metadata wrappers. Wrapper request IDs must not replace the identities of nested alert records.
+Pagination counts and continuation fields (`total`, `totalCount`, `next`, `hasMore`, and similar) are ignored. Their meaning is undocumented: a `total` may count unfiltered alerts, and `next` may be null or a URL. Trusting them either fails every poll or ends a window early. The runner instead pages until the source returns no new rows, re-reading a few rows at each page boundary; see [operations](operations.md#checkpoints-and-replay). Wrapper request IDs must not replace the identities of nested alert records.
 
 ## Field destinations
 
@@ -58,7 +58,8 @@ Recognized pagination totals must be nonnegative JSON integers, and continuation
 | `severity`, `user_severity` | Context and severity tag; supported values map to Indicator severity |
 | `created_at`, `updated_at` | Bulletin source timestamps |
 | `first_seen`, `first_seen_on`, `last_seen`, `last_seen_on` | Observable source timestamps when available |
-| `ioc`, `data.ioc`, common IOC-shaped keys, or configured paths | Native Indicators after validation and exclusion checks |
+| `ioc`, `data.ioc`, common IOC-shaped keys, or default configured paths, in `CYBLE_INDICATOR_SERVICES` alerts | Native Indicators after validation and exclusion checks |
+| The same keys in other services | Bulletin JSON only; native Indicators only through `services.<slug>` field-map rules |
 | `data.ioc_type` and related type fields | Observable type hints, subject to final SDK validation |
 | `cve`, risk/confidence labels, behavior tags, references, and all other fields | Original values and types under original field names in full-mode bulletin JSON |
 | Structured objects and arrays, including empty containers and nulls | Preserved in full-mode bulletin JSON |
@@ -66,7 +67,7 @@ Recognized pagination totals must be nonnegative JSON integers, and continuation
 | Exposed passwords, tokens, usernames, emails, personal data, internal IPs, and raw text | Preserved in the private bulletin body in full mode |
 | Attachment metadata and URLs | Preserved when present in the source alert; no linked content or binary attachment is fetched |
 
-Reports use `Report(threat_model_type="tipreport")`, private visibility, and amber TLP by default. Native Indicators are associated through the Feed SDK. The default threat type is `malware`; configure it to match your feed's semantics. A syntactically valid domain or URL is not proof of maliciousness.
+Reports use `Report(threat_model_type="tipreport")`, private visibility, and amber TLP by default. The raw validated alert ID is the report identity in both content modes. Native Indicators are associated through the Feed SDK. The default threat type is `malware`; configure it to match your feed's semantics. A syntactically valid domain or URL is not proof of maliciousness.
 
 Cyble confidence and risk labels are not converted to an Anomali confidence score because the scales are not established as equivalent. CVEs remain in bulletin context; this connector does not create a separate native vulnerability object for every CVE.
 
@@ -84,7 +85,7 @@ A live record under `data.new_vulnerability[]` included standard alert fields an
 
 ## Custom extraction rules
 
-Set `CYBLE_FIELD_MAP_PATH` to a JSON file. The bundled [example](../config/field-map.example.json) provides common paths. Defaults apply to all services; a `services` entry adds rules for a particular slug.
+Set `CYBLE_FIELD_MAP_PATH` to a JSON file. The bundled [example](../config/field-map.example.json) provides common paths. `default` IOC rules apply to the services in `CYBLE_INDICATOR_SERVICES` (default `iocs`). A `services` entry adds rules for its slug whether or not that service is listed, so it is the way to extract one known-malicious field from an otherwise contextual service.
 
 ```json
 {
@@ -108,7 +109,7 @@ Set `CYBLE_FIELD_MAP_PATH` to a JSON file. The bundled [example](../config/field
 
 `example_service` and its fields are illustrative. Use actual service slugs and paths established from the corresponding response. Dotted paths and `[*]` array expansion are supported. `context_paths` adds safe summary text; it is not needed to retain the corresponding structured JSON field.
 
-Wildcard value and type paths pair by their original array index tuples, including nested arrays. Missing fields cannot shift a type onto another value. Wildcard paths must have the same wildcard depth; a type path without wildcards supplies a shared scalar type. Unsupported syntax fails before polling.
+Wildcard value and type paths pair by their original array index tuples, including nested arrays. Missing fields cannot shift a type onto another value. Wildcard paths must have the same wildcard depth; a type path without wildcards supplies a shared scalar type. Unsupported syntax fails before polling. A wildcard that meets a non-array in a particular alert selects nothing for that alert; a scalar is never treated as a one-item array.
 
 Native Indicator extraction and summary mapping read a sanitized derivative in both content modes. An explicit rule cannot promote passwords, email addresses, session tokens, or raw source text into native malicious Indicators. These source values remain available in the full-mode private JSON body.
 
@@ -118,11 +119,11 @@ Native Indicator extraction and summary mapping read a sanitized derivative in b
 
 `CYBLE_CONTENT_MODE=redacted` retains the v0.4.1 policy: known sensitive field names and common sensitive patterns are redacted; unstructured content/message/body/paste fields and opaque data strings are omitted. Nested object and array structure remains visible; scalar values under a sensitive parent are redacted. Ordinary descriptive text is retained after common pattern redaction. Pattern-based redaction cannot guarantee detection of every personal-data pattern.
 
-In both modes, public IPs, domains, HTTP/HTTPS URLs, and supported file hashes may become native Indicators after validation. Non-public IPs, email addresses, credential values, and excluded types remain contextual content. The native extraction path does not classify every retained source value as malicious.
+In both modes, public IPs, domains, HTTP/HTTPS URLs, and supported file hashes from indicator services may become native Indicators after validation. Non-public IPs, email addresses, credential values, and excluded types remain contextual content. The native extraction path does not classify every retained source value as malicious.
 
 ## Data handling limits
 
-JSON larger than `CYBLE_MAX_REPORT_BYTES`, or nesting beyond 32 levels, fails the window without silent truncation. Full mode rejects `CYBLE_WITH_DATA_MESSAGE=false` because it would request reduced detail. The connector can preserve only fields returned by the selected API and subscription; it cannot reconstruct omitted data.
+Source JSON larger than `CYBLE_MAX_REPORT_BYTES` is shortened on a character boundary. The bulletin says so with the original size, is tagged `cyble_source_truncated`, and still receives native Indicators extracted from the complete alert. The shortened body is no longer valid JSON; retrieve the full record from Cyble by alert ID. Full mode preserves up to 256 nesting levels. Redacted bodies and the derived analysis view replace structure deeper than 32 levels with an omission marker. An alert without a usable ID or with non-JSON values is quarantined; see [operations](operations.md#quarantined-alerts). Full mode rejects `CYBLE_WITH_DATA_MESSAGE=false` because it would request reduced detail. The connector can preserve only fields returned by the selected API and subscription; it cannot reconstruct omitted data.
 
 SDK remote-image fetching is disabled. Attachment metadata and URLs returned in the alert remain in its JSON body, but images, binary attachments, and external linked content are not downloaded. Source content is treated as data and is not executed. Keep bulletin access and downstream distribution aligned with the feed's private-content policy.
 

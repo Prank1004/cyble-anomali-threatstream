@@ -22,23 +22,40 @@
   <a href="docs/operations.md">Operate</a> ·
   <a href="docs/validation.md">Validation</a> ·
   <a href="docs/anomali-handoff.md">Anomali review</a> ·
+  <a href="CHANGELOG.md">Change log</a> ·
+  <a href="SECURITY.md">Security</a> ·
+  <a href="NOTICE.md">Notice</a> ·
   <a href="CONTRIBUTING.md">Contribute</a>
 </p>
 
+---
+
 This connector polls **Cyble Vision Alerts API v2** and sends private alert bulletins and validated indicators to **Anomali ThreatStream**. Run it as a continuous poller (`--daemon`) for near-real-time ingestion, or schedule single cycles. Cyble's JSON API is the source; a STIX/TAXII subscription is not required.
 
+> [!WARNING]
 > **Version 0.6.0 — integration preview; it has not yet ingested a live alert.** Local and CI checks cover the implementation; live Cyble and ThreatStream acceptance remain pending. Only `iocs` and `new_vulnerability` detail schemas have been inspected against live Cyble responses. The SDK pins dependencies with published advisories; see the [Anomali handoff](docs/anomali-handoff.md) for vendor decisions and the [validation record](docs/validation.md) for measured coverage. This is an independent community project, with no Cyble or Anomali endorsement.
+
+## Contents
+
+- [What it does](#what-it-does)
+- [How data moves](#how-data-moves)
+- [Quick start](#quick-start)
+- [Where every Cyble field goes](#where-every-cyble-field-goes)
+- [Repository guide](#repository-guide)
+- [License and trademarks](#license-and-trademarks)
 
 ## What it does
 
-- Polls continuously (default every 60 seconds), so a new alert typically reaches ThreatStream one to two minutes after it becomes searchable in Cyble.
-- Discovers alert-capable services with `CYBLE_SERVICES=all`, or polls an explicit service list.
-- Creates one private ThreatStream bulletin per alert, retaining every source field and value in its JSON body by default, including raw text, exposed credentials, and personal data.
-- Collects creation and update changes, then re-reads settled history a day later to catch alerts that arrived late.
-- Attaches IPs, domains, URLs, and hashes from IOC services (`iocs` by default) as native Indicators; leak and exposure alerts keep the customer's own assets in the bulletin instead of labelling them malicious.
-- Quarantines an unusable alert instead of stalling its service, and shortens oversized source JSON instead of dropping the bulletin.
-- Keeps false-positive alert status in the bulletin without creating new indicators for that alert.
-- Uses verified TLS, bounded polling, guarded checkpoints, and logs that exclude source payloads and credentials.
+| Area | Behavior |
+|---|---|
+| Polling cadence | Polls continuously (default every 60 seconds), so a new alert typically reaches ThreatStream one to two minutes after it becomes searchable in Cyble. |
+| Service discovery | Discovers alert-capable services with `CYBLE_SERVICES=all`, or polls an explicit service list. |
+| Bulletins | Creates one private ThreatStream bulletin per alert, retaining every source field and value in its JSON body by default, including raw text, exposed credentials, and personal data. |
+| Change tracking | Collects creation and update changes, then re-reads settled history a day later to catch alerts that arrived late. |
+| Native Indicators | Attaches IPs, domains, URLs, and hashes from IOC services (`iocs` by default) as native Indicators; leak and exposure alerts keep the customer's own assets in the bulletin instead of labelling them malicious. |
+| Resilience | Quarantines an unusable alert instead of stalling its service, and shortens oversized source JSON instead of dropping the bulletin. |
+| False positives | Keeps false-positive alert status in the bulletin without creating new indicators for that alert. |
+| Safety | Uses verified TLS, bounded polling, guarded checkpoints, and logs that exclude source payloads and credentials. |
 
 ## How data moves
 
@@ -56,7 +73,8 @@ flowchart LR
     I --> C
 ```
 
-**Latency.** The Alerts API only answers queries, so this is near real time, not push. Latency is roughly the poll interval plus `CYBLE_SETTLE_SECONDS` (15 seconds) plus processing. Each poll sends at least one Cyble request per service for each active stream: with 52 services and both creation and update polling, that is about 104 requests a minute at the default interval. Confirm that quota with Cyble before lowering the interval.
+> [!NOTE]
+> **Latency.** The Alerts API only answers queries, so this is near real time, not push. Latency is roughly the poll interval plus `CYBLE_SETTLE_SECONDS` (15 seconds) plus processing. Each poll sends at least one Cyble request per service for each active stream: with 52 services and both creation and update polling, that is about 104 requests a minute at the default interval. Confirm that quota with Cyble before lowering the interval.
 
 `--daemon` needs a host you control (VM, container, or systemd service). If the connector runs inside a runner that only schedules single invocations, latency is bounded by that schedule instead. See [deployment](docs/deployment.md#run-continuously).
 
@@ -72,7 +90,7 @@ python3.11 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 ```
 
-Configure the following through the feed runner's secret and environment store. [`.env.example`](.env.example) documents the names; the connector does not automatically load `.env` files.
+Configure the following through the feed runner's secret and environment store. The table covers 11 of the 30 variables in [`.env.example`](.env.example), which documents every name and its default where one exists; the connector does not automatically load `.env` files.
 
 | Variable | Value |
 |---|---|
@@ -105,7 +123,18 @@ Inspect the version and Cyble catalogue, preview mapping, then start ingestion:
 .venv/bin/python source/cyble_anomali_feed.py
 ```
 
-`all` selects catalogue entries with `allowAlerts=true`. It covers accessible services exposed by Alerts API v2; it does not add other Cyble product APIs or retrieve fields the API does not return. Discovery does not prove subscription entitlement or a working payload for every service. A service that returns permission or schema errors is retried with backoff; the others keep flowing. Start with the [deployment guide](docs/deployment.md) for feed permissions, rollout, configuration, and content-mode migration.
+| Invocation | Effect | Writes to ThreatStream |
+|---|---|---|
+| `--version` | Prints the connector version and exits | No |
+| `--list-services` | Lists the Cyble alert services available to the API token, then exits | No |
+| `--dry-run` | Maps at most one recent alert per configured service and validates SDK models locally; no checkpoint write | No |
+| `--daemon` | Runs continuously, polling every `CYBLE_POLL_INTERVAL_SECONDS` until SIGTERM/SIGINT | Yes |
+| no flag | Runs one bounded cycle for an external scheduler | Yes |
+
+`--daemon`, `--list-services`, and `--dry-run` are mutually exclusive.
+
+> [!NOTE]
+> `all` selects catalogue entries with `allowAlerts=true`. It covers accessible services exposed by Alerts API v2; it does not add other Cyble product APIs or retrieve fields the API does not return. Discovery does not prove subscription entitlement or a working payload for every service. A service that returns permission or schema errors is retried with backoff; the others keep flowing. Start with the [deployment guide](docs/deployment.md) for feed permissions, rollout, configuration, and content-mode migration.
 
 ## Where every Cyble field goes
 
@@ -121,27 +150,43 @@ Inspect the version and Cyble catalogue, preview mapping, then start ingestion:
 | Raw text and JSON-encoded strings | Retained as the original strings in `full` mode |
 | Attachment metadata and URLs returned in the alert | Retained in the body; binary files and linked content are not downloaded |
 
+> [!WARNING]
+> Full mode intentionally stores source exposure data in the private bulletin body. Connector authentication credentials remain in the runtime secret store and are never added to report bodies. Logs, public issues, and fixtures must contain no real source payloads or secrets. Optional `redacted` mode retains the previous field redaction and raw-text omission policy.
+>
+> Previously associated or shared ThreatStream indicators are not automatically deleted or revoked when an alert changes status. Native IOC CSV ingestion remains asynchronous, and the hosted SDK cache can suppress refreshed attributes; verify final report and indicator state in your tenant. Changing content modes replays the configured lookback so recent bulletins can be updated; it does not automatically restore all older history.
+
+Full details, supported response envelopes, custom paths, and data handling are in [field mapping](docs/api-mapping.md).
+
+<details>
+<summary><strong>Data-handling details</strong></summary>
+
 **Preserving a field in bulletin JSON does not create a native ThreatStream field.** Arbitrary Cyble fields remain available as context; native observable mapping is limited to supported types. Cyble risk/confidence labels are retained without inventing an equivalent Anomali score. Native Indicators and summary fields use a sanitized derivative of the alert in both content modes.
 
-Full mode intentionally stores source exposure data in the private bulletin body. Connector authentication credentials remain in the runtime secret store and are never added to report bodies. Logs, public issues, and fixtures must contain no real source payloads or secrets. Optional `redacted` mode retains the previous field redaction and raw-text omission policy.
+False-positive records remain visible for context and status tracking. They produce no new Indicators.
 
-False-positive records remain visible for context and status tracking. They produce no new Indicators. Previously associated or shared ThreatStream indicators are not automatically deleted or revoked when an alert changes status.
+Accepted report IDs are checked before progress is saved.
 
-Accepted report IDs are checked before progress is saved. Native IOC CSV ingestion remains asynchronous, and the hosted SDK cache can suppress refreshed attributes; verify final report and indicator state in your tenant.
+An alert larger than `CYBLE_MAX_REPORT_BYTES` still becomes a bulletin, with its source JSON shortened and tagged `cyble_source_truncated`. An alert with no usable ID or non-JSON values is quarantined (recorded without content under `cyble_quarantine_v1`) so its service keeps moving.
 
-An alert larger than `CYBLE_MAX_REPORT_BYTES` still becomes a bulletin, with its source JSON shortened and tagged `cyble_source_truncated`. An alert with no usable ID or non-JSON values is quarantined (recorded without content under `cyble_quarantine_v1`) so its service keeps moving. Changing content modes replays the configured lookback so recent bulletins can be updated; it does not automatically restore all older history. Full details, supported response envelopes, custom paths, and data handling are in [field mapping](docs/api-mapping.md).
+</details>
 
 ## Repository guide
 
 | Path | Purpose |
 |---|---|
 | [`source/`](source/) | Cyble API client and Feed SDK ingestion entry point |
+| [`tests/`](tests/) | 8 files with 135 test functions: 122 run offline in CI; the 13 real-SDK contract checks are skipped unless the licensed `anomali_feedsdk` wheel (2.8.1 expected) is installed |
 | [`config/field-map.example.json`](config/field-map.example.json) | Common paths and per-service IOC/context rules |
 | [`.env.example`](.env.example) | Configuration names and defaults |
 | [`docs/deployment.md`](docs/deployment.md) | Installation, scheduling, and upgrade instructions |
+| [`docs/api-mapping.md`](docs/api-mapping.md) | Field destinations, accepted response envelopes, custom extraction rules, and content modes |
 | [`docs/operations.md`](docs/operations.md) | Checkpoints, recovery, and troubleshooting |
 | [`docs/validation.md`](docs/validation.md) | Validation evidence and remaining integration checks |
+| [`docs/anomali-handoff.md`](docs/anomali-handoff.md) | Vendor technical review: integration contract, dependency review, and decisions requested from Anomali |
+| [`CHANGELOG.md`](CHANGELOG.md) | Release notes, 0.2.0 through 0.6.0 |
 | [`SECURITY.md`](SECURITY.md) | Private vulnerability reporting and data handling |
+| [`NOTICE.md`](NOTICE.md) | Community-project status, trademark notices, and the non-redistribution of vendor materials |
+| [`CITATION.cff`](CITATION.cff) | Citation metadata for the connector |
 
 Use the [Cyble API portal](https://cyble.ai/utilities/access-apis?tab=alerts-api-v2) for vendor API documentation. Report reproducible connector issues with synthetic data through the [issue templates](https://github.com/Prank1004/cyble-anomali-threatstream/issues/new/choose).
 
